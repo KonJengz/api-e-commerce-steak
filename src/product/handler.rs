@@ -16,13 +16,14 @@ use super::service;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_products).post(create_product))
-        .route("/{id}", get(get_product).put(update_product).delete(delete_product))
+        .route(
+            "/{id}",
+            get(get_product).put(update_product).delete(delete_product),
+        )
 }
 
 /// GET /api/products (public)
-async fn list_products(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<Product>>, AppError> {
+async fn list_products(State(state): State<AppState>) -> Result<Json<Vec<Product>>, AppError> {
     let products = service::list_products(&state.pool).await?;
     Ok(Json(products))
 }
@@ -67,5 +68,7 @@ async fn delete_product(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     service::delete_product(&state.pool, id).await?;
-    Ok(Json(serde_json::json!({"message": "Product deleted successfully"})))
+    Ok(Json(
+        serde_json::json!({"message": "Product deleted successfully"}),
+    ))
 }

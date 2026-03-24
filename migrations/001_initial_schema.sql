@@ -30,6 +30,7 @@ CREATE TABLE account_providers (
     provider_name VARCHAR(50) NOT NULL,
     provider_id VARCHAR(255) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(user_id, provider_name),
     UNIQUE(provider_name, provider_id)
 );
 

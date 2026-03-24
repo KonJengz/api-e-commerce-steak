@@ -16,7 +16,10 @@ use super::service;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_addresses).post(create_address))
-        .route("/{id}", get(get_address).put(update_address).delete(delete_address))
+        .route(
+            "/{id}",
+            get(get_address).put(update_address).delete(delete_address),
+        )
 }
 
 /// GET /api/addresses
@@ -73,5 +76,7 @@ async fn delete_address(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     service::delete_address(&state.pool, auth.user_id, id).await?;
-    Ok(Json(serde_json::json!({"message": "Address deleted successfully"})))
+    Ok(Json(
+        serde_json::json!({"message": "Address deleted successfully"}),
+    ))
 }

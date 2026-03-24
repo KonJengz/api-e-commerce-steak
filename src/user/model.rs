@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use validator::Validate;
 
 /// User database row
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -39,7 +40,16 @@ impl From<User> for UserProfileResponse {
 }
 
 /// Update profile request
-#[derive(Debug, Deserialize)]
-pub struct UpdateProfileRequest {
-    pub email: Option<String>,
+#[derive(Debug, Deserialize, Validate)]
+pub struct RequestEmailChangeRequest {
+    #[validate(email(message = "Invalid email address"))]
+    pub email: String,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct VerifyEmailChangeRequest {
+    #[validate(email(message = "Invalid email address"))]
+    pub email: String,
+    #[validate(length(equal = 6, message = "Code must be 6 digits"))]
+    pub code: String,
 }

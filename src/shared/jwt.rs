@@ -8,10 +8,10 @@ use super::errors::AppError;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
-    pub sub: Uuid,       // user_id
-    pub role: String,    // USER or ADMIN
-    pub exp: i64,        // expiry timestamp
-    pub iat: i64,        // issued at
+    pub sub: Uuid,    // user_id
+    pub role: String, // USER or ADMIN
+    pub exp: i64,     // expiry timestamp
+    pub iat: i64,     // issued at
 }
 
 /// Create a JWT access token for the given user

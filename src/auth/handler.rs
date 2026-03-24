@@ -1,5 +1,8 @@
+use std::net::SocketAddr;
+use std::time::Duration;
+
 use axum::{
-    extract::State,
+    extract::{ConnectInfo, State},
     http::header::{HeaderMap, SET_COOKIE},
     response::IntoResponse,
     routing::post,
@@ -11,6 +14,7 @@ use validator::Validate;
 use crate::shared::email;
 use crate::shared::errors::AppError;
 use crate::shared::extractors::AuthUser;
+use crate::shared::rate_limit::RateLimitRule;
 use crate::AppState;
 
 use super::model::*;
@@ -18,6 +22,7 @@ use super::service;
 
 /// Cookie name for refresh token
 const REFRESH_TOKEN_COOKIE: &str = "refresh_token";
+const AUTH_RATE_LIMIT_WINDOW_SECONDS: u64 = 15 * 60;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -47,16 +52,94 @@ fn build_clear_refresh_cookie() -> String {
     )
 }
 
+fn client_ip(headers: &HeaderMap, addr: SocketAddr) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| addr.ip().to_string())
+}
+
+async fn apply_rate_limit(
+    state: &AppState,
+    key: String,
+    scope: &'static str,
+    max_attempts: u32,
+) -> Result<(), AppError> {
+    state
+        .auth_rate_limiter
+        .check(
+            key,
+            RateLimitRule {
+                max_attempts,
+                window: Duration::from_secs(AUTH_RATE_LIMIT_WINDOW_SECONDS),
+                scope,
+            },
+        )
+        .await
+}
+
+async fn apply_ip_limit(
+    state: &AppState,
+    scope: &'static str,
+    client_ip: &str,
+    max_attempts: u32,
+) -> Result<(), AppError> {
+    apply_rate_limit(
+        state,
+        format!("auth:{}:ip:{}", scope, client_ip),
+        scope,
+        max_attempts,
+    )
+    .await
+}
+
+async fn apply_ip_and_email_limit(
+    state: &AppState,
+    scope: &'static str,
+    client_ip: &str,
+    email: &str,
+    ip_max_attempts: u32,
+    email_max_attempts: u32,
+) -> Result<(), AppError> {
+    apply_ip_limit(state, scope, client_ip, ip_max_attempts).await?;
+    apply_rate_limit(
+        state,
+        format!("auth:{}:email:{}", scope, email.trim().to_ascii_lowercase()),
+        scope,
+        email_max_attempts,
+    )
+    .await
+}
+
 /// POST /api/auth/register
 /// Sends verification email (does NOT create user yet)
 async fn register(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<RegisterRequest>,
 ) -> Result<Json<MessageResponse>, AppError> {
     body.validate()
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    let code = service::create_email_verification(&state.pool, &body.email, &body.password).await?;
+    let client_ip = client_ip(&headers, addr);
+    apply_ip_and_email_limit(&state, "register", &client_ip, &body.email, 10, 3).await?;
+
+    let code =
+        service::create_email_verification(&state.pool, &body.email, &body.password, &state.config)
+            .await?;
 
     // Send verification email (fire and forget in background)
     let config = state.config.clone();
@@ -76,13 +159,19 @@ async fn register(
 /// Verifies email code and creates user account (must login separately for tokens)
 async fn verify_email(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<VerifyEmailRequest>,
 ) -> Result<Json<MessageResponse>, AppError> {
     body.validate()
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
+    let client_ip = client_ip(&headers, addr);
+    apply_ip_and_email_limit(&state, "verify_email", &client_ip, &body.email, 20, 5).await?;
+
     let response =
-        service::verify_email_and_create_user(&state.pool, &body.email, &body.code).await?;
+        service::verify_email_and_create_user(&state.pool, &body.email, &body.code, &state.config)
+            .await?;
 
     // Send welcome email in background
     let config = state.config.clone();
@@ -100,10 +189,15 @@ async fn verify_email(
 /// Authenticates user and returns access_token in body + refresh_token as HttpOnly cookie
 async fn login(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     body.validate()
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    let client_ip = client_ip(&headers, addr);
+    apply_ip_and_email_limit(&state, "login", &client_ip, &body.email, 20, 10).await?;
 
     let tokens = service::login(&state.pool, &body.email, &body.password, &state.config).await?;
 
@@ -133,10 +227,15 @@ async fn login(
 /// Authenticates user with Google ID token and returns tokens
 async fn google_login(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<GoogleLoginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     body.validate()
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    let client_ip = client_ip(&headers, addr);
+    apply_ip_limit(&state, "google_login", &client_ip, 20).await?;
 
     let tokens = service::google_login(&state.pool, &body.token, &state.config).await?;
 
@@ -157,10 +256,15 @@ async fn google_login(
 /// Authenticates user with GitHub authorization code and returns tokens
 async fn github_login(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<GithubLoginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     body.validate()
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    let client_ip = client_ip(&headers, addr);
+    apply_ip_limit(&state, "github_login", &client_ip, 20).await?;
 
     let tokens = service::github_login(&state.pool, &body.code, &state.config).await?;
 
@@ -181,8 +285,13 @@ async fn github_login(
 /// Reads refresh_token from cookie, rotates it, returns new access_token + new cookie
 async fn refresh_token(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     jar: CookieJar,
 ) -> Result<impl IntoResponse, AppError> {
+    let client_ip = client_ip(&headers, addr);
+    apply_ip_limit(&state, "refresh", &client_ip, 30).await?;
+
     let old_token = jar
         .get(REFRESH_TOKEN_COOKIE)
         .map(|c| c.value().to_string())
@@ -212,7 +321,7 @@ async fn logout(
 ) -> Result<impl IntoResponse, AppError> {
     // Try to delete from DB if cookie exists
     if let Some(cookie) = jar.get(REFRESH_TOKEN_COOKIE) {
-        service::logout(&state.pool, cookie.value()).await?;
+        service::logout(&state.pool, cookie.value(), &state.config).await?;
     }
 
     // Clear the cookie

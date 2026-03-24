@@ -27,13 +27,17 @@ pub async fn create_address(
 ) -> Result<Address, AppError> {
     let id = Uuid::now_v7();
     let is_default = req.is_default.unwrap_or(false);
-    let country = req.country.clone().unwrap_or_else(|| "Thailand".to_string());
+    let country = req
+        .country
+        .clone()
+        .unwrap_or_else(|| "Thailand".to_string());
+    let mut tx = pool.begin().await?;
 
     // If this is set as default, unset other defaults
     if is_default {
         sqlx::query("UPDATE addresses SET is_default = FALSE WHERE user_id = $1")
             .bind(user_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
     }
 
@@ -52,8 +56,10 @@ pub async fn create_address(
     .bind(&country)
     .bind(is_default)
     .bind(Utc::now())
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(address)
 }
@@ -65,14 +71,17 @@ pub async fn update_address(
     address_id: Uuid,
     req: &UpdateAddressRequest,
 ) -> Result<Address, AppError> {
+    let mut tx = pool.begin().await?;
+
     // Verify ownership
     let _existing = sqlx::query_as::<_, Address>(
         r#"SELECT id, user_id, recipient_name, phone, address_line, city, postal_code, country, is_default, created_at
-           FROM addresses WHERE id = $1 AND user_id = $2"#,
+           FROM addresses WHERE id = $1 AND user_id = $2
+           FOR UPDATE"#,
     )
     .bind(address_id)
     .bind(user_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| AppError::NotFound("Address not found".to_string()))?;
 
@@ -81,7 +90,7 @@ pub async fn update_address(
         sqlx::query("UPDATE addresses SET is_default = FALSE WHERE user_id = $1 AND id != $2")
             .bind(user_id)
             .bind(address_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
     }
 
@@ -106,8 +115,10 @@ pub async fn update_address(
     .bind(req.is_default)
     .bind(address_id)
     .bind(user_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(address)
 }

@@ -6,18 +6,21 @@ mod product;
 mod shared;
 mod user;
 
+use axum::http::HeaderValue;
 use axum::Router;
 use sqlx::postgres::PgPoolOptions;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use config::AppConfig;
+use shared::rate_limit::RateLimiter;
 
 /// Shared application state accessible by all handlers
 #[derive(Clone)]
 pub struct AppState {
     pub pool: sqlx::PgPool,
     pub config: AppConfig,
+    pub auth_rate_limiter: RateLimiter,
 }
 
 #[tokio::main]
@@ -36,6 +39,10 @@ async fn main() {
     // Load config
     let config = AppConfig::from_env();
     let port = config.app_port;
+    let allowed_origin = config
+        .app_url
+        .parse::<HeaderValue>()
+        .expect("APP_URL must be a valid origin");
 
     // Create database pool
     let pool = PgPoolOptions::new()
@@ -48,12 +55,17 @@ async fn main() {
 
     // CORS
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(allowed_origin)
         .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_headers(Any)
+        .allow_credentials(true);
 
     // App state
-    let state = AppState { pool, config };
+    let state = AppState {
+        pool,
+        config,
+        auth_rate_limiter: RateLimiter::new(),
+    };
 
     // Build router
     let app = Router::new()
@@ -73,7 +85,10 @@ async fn main() {
 
     tracing::info!("🚀 Server running on http://localhost:{}", port);
 
-    axum::serve(listener, app)
-        .await
-        .expect("Server failed");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .expect("Server failed");
 }

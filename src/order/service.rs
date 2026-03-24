@@ -26,9 +26,10 @@ pub async fn create_order(
     }
 
     // Begin transaction
-    let mut tx = pool.begin().await.map_err(|e| {
-        AppError::Internal(format!("Failed to begin transaction: {}", e))
-    })?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to begin transaction: {}", e)))?;
 
     let order_id = Uuid::now_v7();
     let mut total_amount = Decimal::ZERO;
@@ -37,11 +38,13 @@ pub async fn create_order(
     // Process each item: snapshot price + name, check stock
     for item in &req.items {
         if item.quantity <= 0 {
-            return Err(AppError::BadRequest("Quantity must be positive".to_string()));
+            return Err(AppError::BadRequest(
+                "Quantity must be positive".to_string(),
+            ));
         }
 
         let product = sqlx::query_as::<_, (Uuid, String, Decimal, i32, bool)>(
-            "SELECT id, name, current_price, stock, is_active FROM products WHERE id = $1",
+            "SELECT id, name, current_price, stock, is_active FROM products WHERE id = $1 FOR UPDATE",
         )
         .bind(item.product_id)
         .fetch_optional(&mut *tx)
@@ -64,12 +67,21 @@ pub async fn create_order(
             )));
         }
 
-        // Deduct stock
-        sqlx::query("UPDATE products SET stock = stock - $1, updated_at = NOW() WHERE id = $2")
+        // Deduct stock under the same row lock, and keep the update guarded.
+        let stock_update = sqlx::query(
+            "UPDATE products SET stock = stock - $1, updated_at = NOW() WHERE id = $2 AND stock >= $1",
+        )
             .bind(item.quantity)
             .bind(product_id)
             .execute(&mut *tx)
             .await?;
+
+        if stock_update.rows_affected() == 0 {
+            return Err(AppError::BadRequest(format!(
+                "Insufficient stock for '{}'. Available: {}, Requested: {}",
+                product_name, stock, item.quantity
+            )));
+        }
 
         // Snapshot price and name at purchase time
         let item_total = current_price * Decimal::from(item.quantity);
@@ -112,9 +124,9 @@ pub async fn create_order(
     .await?;
 
     // Commit transaction
-    tx.commit().await.map_err(|e| {
-        AppError::Internal(format!("Failed to commit transaction: {}", e))
-    })?;
+    tx.commit()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to commit transaction: {}", e)))?;
 
     Ok(OrderResponse {
         id: order_id,

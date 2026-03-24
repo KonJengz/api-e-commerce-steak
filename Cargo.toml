@@ -55,3 +55,4 @@ validator = { version = "0.19", features = ["derive"] }
 
 # Hex encoding
 hex = "0.4"
+sha2 = "0.10"

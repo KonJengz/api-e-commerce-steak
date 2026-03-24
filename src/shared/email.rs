@@ -69,20 +69,20 @@ async fn send_email(
     config: &AppConfig,
 ) -> Result<(), AppError> {
     let email = Message::builder()
-        .from(config.smtp_from.parse().map_err(|e| {
-            AppError::Internal(format!("Invalid from address: {}", e))
-        })?)
-        .to(to.parse().map_err(|e| {
-            AppError::Internal(format!("Invalid to address: {}", e))
-        })?)
+        .from(
+            config
+                .smtp_from
+                .parse()
+                .map_err(|e| AppError::Internal(format!("Invalid from address: {}", e)))?,
+        )
+        .to(to
+            .parse()
+            .map_err(|e| AppError::Internal(format!("Invalid to address: {}", e)))?)
         .subject(subject)
         .header(ContentType::TEXT_HTML)
         .body(html_body.to_string())?;
 
-    let creds = Credentials::new(
-        config.smtp_username.clone(),
-        config.smtp_password.clone(),
-    );
+    let creds = Credentials::new(config.smtp_username.clone(), config.smtp_password.clone());
 
     let mailer = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_host)
         .map_err(|e| AppError::Internal(format!("SMTP relay error: {}", e)))?

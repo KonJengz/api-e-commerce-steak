@@ -23,7 +23,7 @@ pub async fn list_products(pool: &PgPool) -> Result<Vec<Product>, AppError> {
 pub async fn get_product(pool: &PgPool, product_id: Uuid) -> Result<Product, AppError> {
     let product = sqlx::query_as::<_, Product>(
         r#"SELECT id, name, description, image_url, current_price, stock, is_active, created_at, updated_at
-           FROM products WHERE id = $1"#,
+           FROM products WHERE id = $1 AND is_active = TRUE"#,
     )
     .bind(product_id)
     .fetch_optional(pool)
@@ -34,7 +34,10 @@ pub async fn get_product(pool: &PgPool, product_id: Uuid) -> Result<Product, App
 }
 
 /// Create a product (admin only)
-pub async fn create_product(pool: &PgPool, req: &CreateProductRequest) -> Result<Product, AppError> {
+pub async fn create_product(
+    pool: &PgPool,
+    req: &CreateProductRequest,
+) -> Result<Product, AppError> {
     let id = Uuid::now_v7();
     let now = Utc::now();
     let stock = req.stock.unwrap_or(0);
@@ -92,11 +95,12 @@ pub async fn update_product(
 
 /// Delete a product (soft delete by setting is_active = false)
 pub async fn delete_product(pool: &PgPool, product_id: Uuid) -> Result<(), AppError> {
-    let result = sqlx::query("UPDATE products SET is_active = FALSE, updated_at = $1 WHERE id = $2")
-        .bind(Utc::now())
-        .bind(product_id)
-        .execute(pool)
-        .await?;
+    let result =
+        sqlx::query("UPDATE products SET is_active = FALSE, updated_at = $1 WHERE id = $2")
+            .bind(Utc::now())
+            .bind(product_id)
+            .execute(pool)
+            .await?;
 
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound("Product not found".to_string()));

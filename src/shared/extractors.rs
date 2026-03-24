@@ -37,10 +37,24 @@ impl FromRequestParts<AppState> for AuthUser {
             .ok_or_else(|| AppError::Unauthorized("Invalid authorization format".to_string()))?;
 
         let claims = jwt::verify_access_token(token, &state.config.jwt_secret)?;
+        let current_user =
+            sqlx::query_as::<_, (String, bool)>("SELECT role, is_active FROM users WHERE id = $1")
+                .bind(claims.sub)
+                .fetch_optional(&state.pool)
+                .await?
+                .ok_or_else(|| AppError::Unauthorized("User no longer exists".to_string()))?;
+
+        let (role, is_active) = current_user;
+
+        if !is_active {
+            return Err(AppError::Unauthorized(
+                "User account is inactive".to_string(),
+            ));
+        }
 
         Ok(AuthUser {
             user_id: claims.sub,
-            role: claims.role,
+            role,
         })
     }
 }

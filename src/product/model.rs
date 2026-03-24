@@ -10,6 +10,7 @@ pub struct Product {
     pub name: String,
     pub description: Option<String>,
     pub image_url: Option<String>,
+    pub image_public_id: Option<String>,
     pub current_price: Decimal,
     pub stock: i32,
     pub is_active: bool,
@@ -23,6 +24,7 @@ pub struct CreateProductRequest {
     pub name: String,
     pub description: Option<String>,
     pub image_url: Option<String>,
+    pub image_public_id: Option<String>,
     pub current_price: Decimal,
     pub stock: Option<i32>,
 }
@@ -32,6 +34,7 @@ pub struct UpdateProductRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub image_url: Option<String>,
+    pub image_public_id: Option<String>,
     pub current_price: Option<Decimal>,
     pub stock: Option<i32>,
     pub is_active: Option<bool>,

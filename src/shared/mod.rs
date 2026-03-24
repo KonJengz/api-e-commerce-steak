@@ -1,8 +1,10 @@
+pub mod cloudinary;
 pub mod email;
 pub mod errors;
 pub mod extractors;
 pub mod http;
 pub mod jwt;
+pub mod maintenance;
 pub mod password;
 pub mod rate_limit;
 pub mod security;

@@ -1,5 +1,6 @@
 use sqlx::postgres::PgPoolOptions;
 use std::fs;
+use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() {
@@ -13,7 +14,7 @@ async fn main() {
         .await
         .expect("Failed to connect to database");
 
-    println!("🗑️  Dropping all tables...");
+    println!("Dropping and recreating public schema...");
     sqlx::query("DROP SCHEMA public CASCADE")
         .execute(&pool)
         .await
@@ -24,14 +25,26 @@ async fn main() {
         .await
         .expect("Failed to create schema");
 
-    println!("📦 Running migration...");
-    let sql = fs::read_to_string("migrations/001_initial_schema.sql")
-        .expect("Failed to read migration file");
+    println!("Running all migrations...");
+    let mut migrations = fs::read_dir("migrations")
+        .expect("Failed to read migrations directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sql"))
+        .collect::<Vec<PathBuf>>();
 
-    sqlx::raw_sql(&sql)
-        .execute(&pool)
-        .await
-        .expect("Failed to run migration");
+    migrations.sort();
 
-    println!("✅ Database reset complete!");
+    for migration in migrations {
+        let path = migration.display().to_string();
+        println!("Applying {}", path);
+        let sql = fs::read_to_string(&migration).expect("Failed to read migration file");
+
+        sqlx::raw_sql(&sql)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|error| panic!("Failed to run migration {}: {}", path, error));
+    }
+
+    println!("Database reset complete!");
 }

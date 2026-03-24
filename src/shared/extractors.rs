@@ -15,7 +15,6 @@ pub struct AuthUser {
 /// Admin-only extractor — rejects non-ADMIN users
 #[derive(Debug, Clone)]
 pub struct AdminUser {
-    #[allow(dead_code)]
     pub user_id: Uuid,
 }
 

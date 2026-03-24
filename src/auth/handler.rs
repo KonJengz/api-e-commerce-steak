@@ -36,20 +36,22 @@ pub fn router() -> Router<AppState> {
         .route("/logout", post(logout))
 }
 
-/// Build a Set-Cookie header string for the refresh token (HttpOnly, Secure, SameSite)
-fn build_refresh_cookie(token: &str, max_age_days: i64) -> String {
+/// Build a Set-Cookie header string for the refresh token (HttpOnly, SameSite)
+fn build_refresh_cookie(token: &str, max_age_days: i64, cookie_secure: bool) -> String {
     let max_age_seconds = max_age_days * 24 * 60 * 60;
+    let secure_flag = if cookie_secure { "Secure; " } else { "" };
     format!(
-        "{}={}; HttpOnly; Secure; SameSite=Strict; Path=/api/auth; Max-Age={}",
-        REFRESH_TOKEN_COOKIE, token, max_age_seconds
+        "{}={}; HttpOnly; {}SameSite=Strict; Path=/api/auth; Max-Age={}",
+        REFRESH_TOKEN_COOKIE, token, secure_flag, max_age_seconds
     )
 }
 
 /// Build a Set-Cookie header that clears the refresh token cookie
-fn build_clear_refresh_cookie() -> String {
+fn build_clear_refresh_cookie(cookie_secure: bool) -> String {
+    let secure_flag = if cookie_secure { "Secure; " } else { "" };
     format!(
-        "{}=; HttpOnly; Secure; SameSite=Strict; Path=/api/auth; Max-Age=0",
-        REFRESH_TOKEN_COOKIE
+        "{}=; HttpOnly; {}SameSite=Strict; Path=/api/auth; Max-Age=0",
+        REFRESH_TOKEN_COOKIE, secure_flag
     )
 }
 
@@ -116,7 +118,7 @@ async fn register(
     body.validate()
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    let client_ip = client_ip(&headers, addr);
+    let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
     apply_ip_and_email_limit(&state, "register", &client_ip, &body.email, 10, 3).await?;
 
     let code =
@@ -148,7 +150,7 @@ async fn verify_email(
     body.validate()
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    let client_ip = client_ip(&headers, addr);
+    let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
     apply_ip_and_email_limit(&state, "verify_email", &client_ip, &body.email, 20, 5).await?;
 
     let response =
@@ -178,7 +180,7 @@ async fn login(
     body.validate()
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    let client_ip = client_ip(&headers, addr);
+    let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
     apply_ip_and_email_limit(&state, "login", &client_ip, &body.email, 20, 10).await?;
 
     let tokens = service::login(&state.pool, &body.email, &body.password, &state.config).await?;
@@ -193,7 +195,11 @@ async fn login(
     });
 
     // Set refresh token as HttpOnly cookie
-    let cookie = build_refresh_cookie(&tokens.refresh_token, state.config.jwt_refresh_expiry_days);
+    let cookie = build_refresh_cookie(
+        &tokens.refresh_token,
+        state.config.jwt_refresh_expiry_days,
+        state.config.cookie_secure,
+    );
     let mut headers = HeaderMap::new();
     headers.insert(SET_COOKIE, cookie.parse().unwrap());
 
@@ -216,13 +222,17 @@ async fn google_login(
     body.validate()
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    let client_ip = client_ip(&headers, addr);
+    let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
     apply_ip_limit(&state, "google_login", &client_ip, 20).await?;
 
     let tokens = service::google_login(&state.pool, &body.token, &state.config).await?;
 
     // Set refresh token as HttpOnly cookie
-    let cookie = build_refresh_cookie(&tokens.refresh_token, state.config.jwt_refresh_expiry_days);
+    let cookie = build_refresh_cookie(
+        &tokens.refresh_token,
+        state.config.jwt_refresh_expiry_days,
+        state.config.cookie_secure,
+    );
     let mut headers = HeaderMap::new();
     headers.insert(SET_COOKIE, cookie.parse().unwrap());
 
@@ -245,13 +255,17 @@ async fn github_login(
     body.validate()
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    let client_ip = client_ip(&headers, addr);
+    let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
     apply_ip_limit(&state, "github_login", &client_ip, 20).await?;
 
     let tokens = service::github_login(&state.pool, &body.code, &state.config).await?;
 
     // Set refresh token as HttpOnly cookie
-    let cookie = build_refresh_cookie(&tokens.refresh_token, state.config.jwt_refresh_expiry_days);
+    let cookie = build_refresh_cookie(
+        &tokens.refresh_token,
+        state.config.jwt_refresh_expiry_days,
+        state.config.cookie_secure,
+    );
     let mut headers = HeaderMap::new();
     headers.insert(SET_COOKIE, cookie.parse().unwrap());
 
@@ -271,7 +285,7 @@ async fn refresh_token(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     jar: CookieJar,
 ) -> Result<impl IntoResponse, AppError> {
-    let client_ip = client_ip(&headers, addr);
+    let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
     apply_ip_limit(&state, "refresh", &client_ip, 30).await?;
 
     let old_token = jar
@@ -282,7 +296,11 @@ async fn refresh_token(
     let tokens = service::rotate_refresh_token(&state.pool, &old_token, &state.config).await?;
 
     // Set new refresh token cookie
-    let cookie = build_refresh_cookie(&tokens.refresh_token, state.config.jwt_refresh_expiry_days);
+    let cookie = build_refresh_cookie(
+        &tokens.refresh_token,
+        state.config.jwt_refresh_expiry_days,
+        state.config.cookie_secure,
+    );
     let mut headers = HeaderMap::new();
     headers.insert(SET_COOKIE, cookie.parse().unwrap());
 
@@ -307,7 +325,7 @@ async fn logout(
     }
 
     // Clear the cookie
-    let clear_cookie = build_clear_refresh_cookie();
+    let clear_cookie = build_clear_refresh_cookie(state.config.cookie_secure);
     let mut headers = HeaderMap::new();
     headers.insert(SET_COOKIE, clear_cookie.parse().unwrap());
 

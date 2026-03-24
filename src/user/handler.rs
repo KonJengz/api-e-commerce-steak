@@ -64,7 +64,7 @@ async fn request_email_change(
     body.validate()
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    let client_ip = client_ip(&headers, addr);
+    let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
     apply_rate_limit(
         &state,
         format!(
@@ -103,7 +103,7 @@ async fn verify_email_change(
     body.validate()
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    let client_ip = client_ip(&headers, addr);
+    let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
     apply_rate_limit(
         &state,
         format!(

@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Multipart, Path, State},
+    extract::{Multipart, Path, Query, State},
     routing::{get, post},
     Json, Router,
 };
@@ -9,6 +9,7 @@ use validator::Validate;
 use crate::shared::cloudinary;
 use crate::shared::errors::AppError;
 use crate::shared::extractors::AdminUser;
+use crate::shared::pagination::{PaginatedResponse, PaginationQuery};
 use crate::AppState;
 
 use super::model::*;
@@ -28,8 +29,11 @@ pub fn router() -> Router<AppState> {
 }
 
 /// GET /api/products (public)
-async fn list_products(State(state): State<AppState>) -> Result<Json<Vec<Product>>, AppError> {
-    let products = service::list_products(&state.pool).await?;
+async fn list_products(
+    State(state): State<AppState>,
+    Query(query): Query<PaginationQuery>,
+) -> Result<Json<PaginatedResponse<Product>>, AppError> {
+    let products = service::list_products(&state.pool, query).await?;
     Ok(Json(products))
 }
 

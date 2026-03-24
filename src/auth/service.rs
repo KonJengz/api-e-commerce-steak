@@ -76,7 +76,7 @@ pub async fn create_email_verification(
         &email,
         &code,
     );
-    let hashed_password = password::hash_password(plain_password)?;
+    let hashed_password = password::hash_password(plain_password.to_string()).await?;
     let expires_at = Utc::now() + Duration::minutes(EMAIL_VERIFICATION_EXPIRY_MINUTES);
 
     let mut tx = pool.begin().await?;
@@ -192,7 +192,7 @@ pub async fn login(
         AppError::Unauthorized("Please login with your social account".to_string())
     })?;
 
-    let is_valid = password::verify_password(plain_password, &password_hash)?;
+    let is_valid = password::verify_password(plain_password.to_string(), password_hash).await?;
     if !is_valid {
         return Err(AppError::Unauthorized(
             "Invalid email or password".to_string(),

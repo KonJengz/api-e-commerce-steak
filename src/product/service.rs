@@ -4,20 +4,36 @@ use uuid::Uuid;
 
 use crate::config::AppConfig;
 use crate::shared::errors::AppError;
+use crate::shared::pagination::{PaginatedResponse, PaginationQuery};
 
 use super::model::{CreateProductRequest, Product, UpdateProductRequest};
 
 /// List all active products
-pub async fn list_products(pool: &PgPool) -> Result<Vec<Product>, AppError> {
+pub async fn list_products(
+    pool: &PgPool,
+    query: PaginationQuery,
+) -> Result<PaginatedResponse<Product>, AppError> {
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM products WHERE is_active = TRUE")
+        .fetch_one(pool)
+        .await?;
+
     let products = sqlx::query_as::<_, Product>(
         r#"SELECT id, name, description, image_url, image_public_id, current_price, stock, is_active, created_at, updated_at
            FROM products WHERE is_active = TRUE
-           ORDER BY created_at DESC"#,
+           ORDER BY created_at DESC
+           LIMIT $1 OFFSET $2"#,
     )
+    .bind(query.limit())
+    .bind(query.offset())
     .fetch_all(pool)
     .await?;
 
-    Ok(products)
+    Ok(PaginatedResponse::new(
+        products,
+        total,
+        query.page(),
+        query.limit(),
+    ))
 }
 
 /// Get a product by ID

@@ -10,6 +10,7 @@ use axum::{
 use validator::Validate;
 
 use crate::auth::model::MessageResponse;
+use crate::shared::background::spawn_app_task;
 use crate::shared::errors::AppError;
 use crate::shared::extractors::AuthUser;
 use crate::shared::http::client_ip;
@@ -82,10 +83,8 @@ async fn request_email_change(
 
     let config = state.config.clone();
     let to = body.email.clone();
-    tokio::spawn(async move {
-        if let Err(e) = crate::shared::email::send_verification_email(&to, &code, &config).await {
-            tracing::error!("Failed to send email change verification email: {}", e);
-        }
+    spawn_app_task("send_email_change_verification", async move {
+        crate::shared::email::send_verification_email(&to, &code, &config).await
     });
 
     Ok(Json(MessageResponse {

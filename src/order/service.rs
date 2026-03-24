@@ -3,6 +3,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::shared::errors::AppError;
+use crate::shared::pagination::{PaginatedResponse, PaginationQuery};
 
 use super::model::*;
 
@@ -140,17 +141,34 @@ pub async fn create_order(
 }
 
 /// List orders for a user
-pub async fn list_orders(pool: &PgPool, user_id: Uuid) -> Result<Vec<Order>, AppError> {
+pub async fn list_orders(
+    pool: &PgPool,
+    user_id: Uuid,
+    query: PaginationQuery,
+) -> Result<PaginatedResponse<Order>, AppError> {
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+
     let orders = sqlx::query_as::<_, Order>(
         r#"SELECT id, user_id, shipping_address_id, total_amount, status, created_at
            FROM orders WHERE user_id = $1
-           ORDER BY created_at DESC"#,
+           ORDER BY created_at DESC
+           LIMIT $2 OFFSET $3"#,
     )
     .bind(user_id)
+    .bind(query.limit())
+    .bind(query.offset())
     .fetch_all(pool)
     .await?;
 
-    Ok(orders)
+    Ok(PaginatedResponse::new(
+        orders,
+        total,
+        query.page(),
+        query.limit(),
+    ))
 }
 
 /// Get an order with its items (verifies ownership)

@@ -7,8 +7,6 @@ mod product;
 mod shared;
 mod user;
 
-use std::time::Duration;
-
 use axum::http::{header, HeaderName, HeaderValue, Method};
 use axum::Router;
 use sqlx::postgres::PgPoolOptions;
@@ -20,7 +18,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 use config::AppConfig;
-use shared::maintenance::spawn_expired_data_cleanup;
+use shared::background::start_background_jobs;
 use shared::rate_limit::RateLimiter;
 
 /// Shared application state accessible by all handlers
@@ -46,18 +44,16 @@ async fn main() {
 
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections)
-        .acquire_timeout(Duration::from_secs(config.database_acquire_timeout_seconds))
+        .acquire_timeout(std::time::Duration::from_secs(
+            config.database_acquire_timeout_seconds,
+        ))
         .connect(&config.database_url)
         .await
         .expect("Failed to connect to database");
 
     tracing::info!(environment = %config.app_env, "connected to database");
 
-    let _cleanup_task = spawn_expired_data_cleanup(
-        pool.clone(),
-        config.clone(),
-        Duration::from_secs(config.cleanup_interval_minutes * 60),
-    );
+    let _background_jobs = start_background_jobs(pool.clone(), config.clone());
 
     let cors = CorsLayer::new()
         .allow_origin(allowed_origin)

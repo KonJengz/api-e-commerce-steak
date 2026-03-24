@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     routing::get,
     Json, Router,
 };
@@ -8,6 +8,7 @@ use validator::Validate;
 
 use crate::shared::errors::AppError;
 use crate::shared::extractors::AuthUser;
+use crate::shared::pagination::{PaginatedResponse, PaginationQuery};
 use crate::AppState;
 
 use super::model::*;
@@ -37,8 +38,9 @@ async fn create_order(
 async fn list_orders(
     State(state): State<AppState>,
     auth: AuthUser,
-) -> Result<Json<Vec<Order>>, AppError> {
-    let orders = service::list_orders(&state.pool, auth.user_id).await?;
+    Query(query): Query<PaginationQuery>,
+) -> Result<Json<PaginatedResponse<Order>>, AppError> {
+    let orders = service::list_orders(&state.pool, auth.user_id, query).await?;
     Ok(Json(orders))
 }
 

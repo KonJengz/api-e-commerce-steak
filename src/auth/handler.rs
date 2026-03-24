@@ -11,6 +11,7 @@ use axum::{
 use axum_extra::extract::CookieJar;
 use validator::Validate;
 
+use crate::shared::background::spawn_app_task;
 use crate::shared::email;
 use crate::shared::errors::AppError;
 use crate::shared::extractors::AuthUser;
@@ -128,10 +129,8 @@ async fn register(
     // Send verification email (fire and forget in background)
     let config = state.config.clone();
     let to = body.email.clone();
-    tokio::spawn(async move {
-        if let Err(e) = email::send_verification_email(&to, &code, &config).await {
-            tracing::error!("Failed to send verification email: {}", e);
-        }
+    spawn_app_task("send_verification_email", async move {
+        email::send_verification_email(&to, &code, &config).await
     });
 
     Ok(Json(MessageResponse {
@@ -160,10 +159,8 @@ async fn verify_email(
     // Send welcome email in background
     let config = state.config.clone();
     let to = body.email.clone();
-    tokio::spawn(async move {
-        if let Err(e) = email::send_welcome_email(&to, &config).await {
-            tracing::error!("Failed to send welcome email: {}", e);
-        }
+    spawn_app_task("send_welcome_email", async move {
+        email::send_welcome_email(&to, &config).await
     });
 
     Ok(Json(response))
@@ -188,10 +185,8 @@ async fn login(
     // Send login notification in background
     let config = state.config.clone();
     let to = body.email.clone();
-    tokio::spawn(async move {
-        if let Err(e) = email::send_login_notification(&to, &config).await {
-            tracing::error!("Failed to send login notification: {}", e);
-        }
+    spawn_app_task("send_login_notification", async move {
+        email::send_login_notification(&to, &config).await
     });
 
     // Set refresh token as HttpOnly cookie

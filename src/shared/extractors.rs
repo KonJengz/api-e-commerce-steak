@@ -1,9 +1,9 @@
 use axum::{extract::FromRequestParts, http::request::Parts};
 use uuid::Uuid;
 
+use crate::AppState;
 use crate::shared::errors::AppError;
 use crate::shared::jwt;
-use crate::AppState;
 
 /// Extracted authenticated user from JWT in Authorization header
 #[derive(Debug, Clone)]

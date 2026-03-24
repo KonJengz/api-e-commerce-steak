@@ -6,7 +6,7 @@ use crate::config::AppConfig;
 use crate::shared::errors::AppError;
 use crate::shared::jwt;
 use crate::shared::security::{
-    hash_verification_code, normalize_email, EMAIL_VERIFICATION_PURPOSE_EMAIL_CHANGE,
+    EMAIL_VERIFICATION_PURPOSE_EMAIL_CHANGE, hash_verification_code, normalize_email,
 };
 
 use super::model::User;

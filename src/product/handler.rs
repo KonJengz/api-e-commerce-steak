@@ -1,16 +1,16 @@
 use axum::{
+    Json, Router,
     extract::{Multipart, Path, Query, State},
     routing::{get, post},
-    Json, Router,
 };
 use uuid::Uuid;
 use validator::Validate;
 
+use crate::AppState;
 use crate::shared::cloudinary;
 use crate::shared::errors::AppError;
 use crate::shared::extractors::AdminUser;
 use crate::shared::pagination::{PaginatedResponse, PaginationQuery};
-use crate::AppState;
 
 use super::model::*;
 use super::service;
@@ -82,28 +82,26 @@ async fn update_product(
         let old_public_id = previous_product.image_public_id;
         let new_public_id = product.image_public_id.clone();
 
-        if let (Some(old_public_id), Some(new_public_id)) = (old_public_id, new_public_id) {
-            if old_public_id != new_public_id {
-                if let Err(error) = cloudinary::delete_image(&old_public_id, &state.config).await {
-                    tracing::error!(
-                        error = %error,
-                        product_id = %product.id,
-                        public_id = %old_public_id,
-                        "failed to delete replaced product image from Cloudinary"
-                    );
+        if let (Some(old_public_id), Some(new_public_id)) = (old_public_id, new_public_id)
+            && old_public_id != new_public_id
+            && let Err(error) = cloudinary::delete_image(&old_public_id, &state.config).await
+        {
+            tracing::error!(
+                error = %error,
+                product_id = %product.id,
+                public_id = %old_public_id,
+                "failed to delete replaced product image from Cloudinary"
+            );
 
-                    if let Err(queue_error) =
-                        service::enqueue_pending_product_image_deletion(&state.pool, &old_public_id)
-                            .await
-                    {
-                        tracing::error!(
-                            error = %queue_error,
-                            product_id = %product.id,
-                            public_id = %old_public_id,
-                            "failed to queue product image for retry deletion"
-                        );
-                    }
-                }
+            if let Err(queue_error) =
+                service::enqueue_pending_product_image_deletion(&state.pool, &old_public_id).await
+            {
+                tracing::error!(
+                    error = %queue_error,
+                    product_id = %product.id,
+                    public_id = %old_public_id,
+                    "failed to queue product image for retry deletion"
+                );
             }
         }
     }
@@ -133,11 +131,15 @@ async fn upload_image(
     let mut file_name = String::new();
     let mut content_type = String::new();
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Failed to parse multipart: {}", e)))?
-    {
+    loop {
+        let Some(field) = multipart
+            .next_field()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Failed to parse multipart: {}", e)))?
+        else {
+            break;
+        };
+
         if field.name() == Some("image") {
             file_name = field.file_name().unwrap_or("image.jpg").to_string();
             content_type = field.content_type().unwrap_or("image/jpeg").to_string();

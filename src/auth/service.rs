@@ -8,8 +8,8 @@ use crate::shared::errors::AppError;
 use crate::shared::jwt;
 use crate::shared::password;
 use crate::shared::security::{
-    hash_refresh_token, hash_verification_code, normalize_email,
-    EMAIL_VERIFICATION_PURPOSE_REGISTER,
+    EMAIL_VERIFICATION_PURPOSE_REGISTER, hash_refresh_token, hash_verification_code,
+    normalize_email,
 };
 
 use super::model::{AuthTokens, MessageResponse, UserInfo};

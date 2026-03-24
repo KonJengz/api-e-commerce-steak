@@ -16,7 +16,7 @@ REST API backend for an e-commerce platform built with Rust, Axum, and PostgreSQ
 
 ## Stack
 
-- Rust (edition 2021)
+- Rust (edition 2024)
 - Axum
 - SQLx + PostgreSQL
 - Tokio

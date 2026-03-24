@@ -36,7 +36,7 @@ impl<T> PaginatedResponse<T> {
         } else {
             (total as f64 / limit as f64).ceil() as i64
         };
-        
+
         Self {
             data,
             total,

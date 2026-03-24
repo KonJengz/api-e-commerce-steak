@@ -1,7 +1,7 @@
 [package]
 name = "backend-rust-2"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 default-run = "backend-rust-2"
 
 [dependencies]
@@ -58,4 +58,3 @@ validator = { version = "0.19", features = ["derive"] }
 hex = "0.4"
 sha1 = "0.10"
 sha2 = "0.10"
-

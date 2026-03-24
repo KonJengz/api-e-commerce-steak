@@ -18,7 +18,9 @@ pub fn spawn_expired_data_cleanup(
         loop {
             ticker.tick().await;
 
-            match cleanup_expired_data(&pool, &config).await {
+            let cleanup_result = cleanup_expired_data(&pool, &config).await;
+
+            match cleanup_result {
                 Ok(stats) => {
                     if stats.deleted_refresh_tokens > 0
                         || stats.deleted_email_verifications > 0

@@ -7,8 +7,8 @@ mod product;
 mod shared;
 mod user;
 
-use axum::http::{header, HeaderName, HeaderValue, Method};
 use axum::Router;
+use axum::http::{HeaderName, HeaderValue, Method, header};
 use sqlx::postgres::PgPoolOptions;
 use tower_http::cors::CorsLayer;
 use tower_http::sensitive_headers::{

@@ -1,14 +1,14 @@
 use axum::{
+    Json, Router,
     extract::{Path, State},
     routing::get,
-    Json, Router,
 };
 use uuid::Uuid;
 use validator::Validate;
 
+use crate::AppState;
 use crate::shared::errors::AppError;
 use crate::shared::extractors::AuthUser;
-use crate::AppState;
 
 use super::model::*;
 use super::service;

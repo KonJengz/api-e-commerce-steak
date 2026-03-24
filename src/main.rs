@@ -6,10 +6,10 @@ mod product;
 mod shared;
 mod user;
 
-use axum::http::HeaderValue;
+use axum::http::{header, HeaderValue, Method};
 use axum::Router;
 use sqlx::postgres::PgPoolOptions;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use config::AppConfig;
@@ -53,11 +53,21 @@ async fn main() {
 
     tracing::info!("Connected to database");
 
-    // CORS
+    // CORS — credentials require explicit headers/methods (wildcard not allowed)
     let cors = CorsLayer::new()
         .allow_origin(allowed_origin)
-        .allow_methods(Any)
-        .allow_headers(Any)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            header::ACCEPT,
+        ])
         .allow_credentials(true);
 
     // App state

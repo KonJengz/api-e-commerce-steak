@@ -17,9 +17,12 @@ CREATE TABLE users (
 CREATE TABLE email_verifications (
     id UUID PRIMARY KEY,
     email VARCHAR(255) NOT NULL,
-    code VARCHAR(6) NOT NULL,
+    code_hash VARCHAR(255) NOT NULL,
     password_hash VARCHAR(255),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    purpose VARCHAR(50) NOT NULL DEFAULT 'REGISTER',
     expires_at TIMESTAMPTZ NOT NULL,
+    attempt_count INT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -34,11 +37,11 @@ CREATE TABLE account_providers (
     UNIQUE(provider_name, provider_id)
 );
 
--- Refresh Tokens
+-- Refresh Tokens (stored as HMAC-SHA256 hashes)
 CREATE TABLE refresh_tokens (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    token VARCHAR(255) UNIQUE NOT NULL,
+    token_hash VARCHAR(255) UNIQUE NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -94,8 +97,9 @@ CREATE TABLE order_items (
 CREATE INDEX idx_users_email ON users(email);
 CREATE INDEX idx_account_providers_user ON account_providers(user_id);
 CREATE INDEX idx_refresh_tokens_user ON refresh_tokens(user_id);
-CREATE INDEX idx_refresh_tokens_token ON refresh_tokens(token);
+CREATE INDEX idx_refresh_tokens_hash ON refresh_tokens(token_hash);
 CREATE INDEX idx_addresses_user ON addresses(user_id);
 CREATE INDEX idx_orders_user ON orders(user_id);
 CREATE INDEX idx_order_items_order ON order_items(order_id);
 CREATE INDEX idx_email_verifications_email ON email_verifications(email);
+CREATE INDEX idx_email_verifications_purpose ON email_verifications(purpose);

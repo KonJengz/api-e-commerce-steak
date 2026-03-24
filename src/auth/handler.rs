@@ -14,6 +14,7 @@ use validator::Validate;
 use crate::shared::email;
 use crate::shared::errors::AppError;
 use crate::shared::extractors::AuthUser;
+use crate::shared::http::client_ip;
 use crate::shared::rate_limit::RateLimitRule;
 use crate::AppState;
 
@@ -50,25 +51,6 @@ fn build_clear_refresh_cookie() -> String {
         "{}=; HttpOnly; Secure; SameSite=Strict; Path=/api/auth; Max-Age=0",
         REFRESH_TOKEN_COOKIE
     )
-}
-
-fn client_ip(headers: &HeaderMap, addr: SocketAddr) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|value| value.to_str().ok())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-        })
-        .unwrap_or_else(|| addr.ip().to_string())
 }
 
 async fn apply_rate_limit(

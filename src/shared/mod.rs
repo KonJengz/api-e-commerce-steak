@@ -1,6 +1,7 @@
 pub mod email;
 pub mod errors;
 pub mod extractors;
+pub mod http;
 pub mod jwt;
 pub mod password;
 pub mod rate_limit;

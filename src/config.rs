@@ -83,7 +83,7 @@ impl AppConfig {
             smtp_password: env::var("SMTP_PASSWORD").expect("SMTP_PASSWORD must be set"),
             smtp_from: env::var("SMTP_FROM").expect("SMTP_FROM must be set"),
             app_url: env::var("APP_URL").unwrap_or_else(|_| "http://localhost:3000".to_string()),
-            app_port: parse_u16_env("APP_PORT", 3000),
+            app_port: parse_port_env(3000),
             cookie_secure: parse_bool_env("COOKIE_SECURE", cookie_secure_default),
             trust_proxy_headers: parse_bool_env("TRUST_PROXY_HEADERS", false),
             cleanup_interval_minutes: parse_u64_env("CLEANUP_INTERVAL_MINUTES", 10),
@@ -205,4 +205,12 @@ fn parse_u16_env(name: &str, default: u16) -> u16 {
         .unwrap_or_else(|_| default.to_string())
         .parse()
         .unwrap_or_else(|_| panic!("{} must be a number", name))
+}
+
+fn parse_port_env(default: u16) -> u16 {
+    env::var("APP_PORT")
+        .or_else(|_| env::var("PORT"))
+        .unwrap_or_else(|_| default.to_string())
+        .parse()
+        .unwrap_or_else(|_| panic!("APP_PORT or PORT must be a number"))
 }

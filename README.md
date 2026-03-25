@@ -229,6 +229,39 @@ Detailed endpoint documentation is in [API_DOCS.md](./API_DOCS.md).
 - Store secrets in platform secret management, not in committed files
 - Set real Cloudinary credentials in production
 
+### DigitalOcean App Platform
+
+Recommended for this repository if you want a managed long-running Rust service without rewriting the app for serverless.
+
+Suggested setup:
+
+- Service type: Web Service
+- Source: GitHub repo
+- Build method: Native Rust buildpack
+- Build command: `cargo build --release`
+- Run command: `./target/release/backend-rust-2`
+- Health check path: `/readyz`
+
+Important environment values:
+
+- `APP_ENV=production`
+- `LOG_JSON=true`
+- `TRUST_PROXY_HEADERS=true`
+- `COOKIE_SECURE=true`
+- `APP_URL=https://your-frontend-domain`
+- `DATABASE_URL_POOLED` or `DATABASE_URL` from Neon
+- `JWT_SECRET`
+- `CLOUDINARY_CLOUD_NAME`
+- `CLOUDINARY_API_KEY`
+- `CLOUDINARY_API_SECRET`
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`
+
+Notes:
+
+- The app now accepts `PORT` automatically, so you do not need to set `APP_PORT` on App Platform unless you want to override it.
+- Run `sqlx migrate run` against your production database before first deploy or before enabling new schema-dependent features.
+- If you later want cleanup tasks to run independently of web traffic, move them into an App Platform scheduled job.
+
 ## Status
 
 The codebase currently passes:

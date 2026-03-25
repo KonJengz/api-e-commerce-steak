@@ -1,5 +1,6 @@
 use std::env;
 use std::fmt;
+use validator::ValidateEmail;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppEnv {
@@ -42,11 +43,8 @@ pub struct AppConfig {
     pub jwt_secret: String,
     pub jwt_access_expiry_minutes: i64,
     pub jwt_refresh_expiry_days: i64,
-    pub smtp_host: String,
-    pub smtp_port: u16,
-    pub smtp_username: String,
-    pub smtp_password: String,
-    pub smtp_from: String,
+    pub resend_api_key: String,
+    pub email_from: String,
     pub app_url: String,
     pub app_port: u16,
     pub cookie_secure: bool,
@@ -77,11 +75,8 @@ impl AppConfig {
             jwt_secret: env::var("JWT_SECRET").expect("JWT_SECRET must be set"),
             jwt_access_expiry_minutes: parse_i64_env("JWT_ACCESS_EXPIRY_MINUTES", 15),
             jwt_refresh_expiry_days: parse_i64_env("JWT_REFRESH_EXPIRY_DAYS", 7),
-            smtp_host: env::var("SMTP_HOST").expect("SMTP_HOST must be set"),
-            smtp_port: parse_u16_env("SMTP_PORT", 587),
-            smtp_username: env::var("SMTP_USERNAME").expect("SMTP_USERNAME must be set"),
-            smtp_password: env::var("SMTP_PASSWORD").expect("SMTP_PASSWORD must be set"),
-            smtp_from: env::var("SMTP_FROM").expect("SMTP_FROM must be set"),
+            resend_api_key: env::var("RESEND_API_KEY").expect("RESEND_API_KEY must be set"),
+            email_from: env::var("EMAIL_FROM").expect("EMAIL_FROM must be set"),
             app_url: env::var("APP_URL").unwrap_or_else(|_| "http://localhost:3000".to_string()),
             app_port: parse_port_env(3000),
             cookie_secure: parse_bool_env("COOKIE_SECURE", cookie_secure_default),
@@ -157,6 +152,18 @@ impl AppConfig {
                     && !self.cloudinary_api_secret.contains("your-api-secret"),
                 "Cloudinary credentials must not use placeholder values in production"
             );
+            assert!(
+                self.resend_api_key.starts_with("re_")
+                    && !self.resend_api_key.contains("xxxxxxxx")
+                    && !self.resend_api_key.contains("123456789"),
+                "RESEND_API_KEY must be a real Resend API key in production"
+            );
+            assert!(
+                self.email_from.validate_email()
+                    && !self.email_from.contains("yourdomain.com")
+                    && !self.email_from.contains("example.com"),
+                "EMAIL_FROM must be a valid, non-placeholder sender address in production"
+            );
         }
     }
 }
@@ -194,13 +201,6 @@ fn parse_u64_env(name: &str, default: u64) -> u64 {
 }
 
 fn parse_u32_env(name: &str, default: u32) -> u32 {
-    env::var(name)
-        .unwrap_or_else(|_| default.to_string())
-        .parse()
-        .unwrap_or_else(|_| panic!("{} must be a number", name))
-}
-
-fn parse_u16_env(name: &str, default: u16) -> u16 {
     env::var(name)
         .unwrap_or_else(|_| default.to_string())
         .parse()

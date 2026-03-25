@@ -62,7 +62,8 @@ Fill in at least:
 - `APP_URL`
 - `DATABASE_URL_POOLED` or `DATABASE_URL`
 - `JWT_SECRET`
-- `SMTP_*`
+- `RESEND_API_KEY`
+- `EMAIL_FROM`
 - `CLOUDINARY_*`
 
 Important:

@@ -12,7 +12,6 @@ use axum_extra::extract::CookieJar;
 use validator::Validate;
 
 use crate::AppState;
-use crate::shared::background::spawn_app_task;
 use crate::shared::email;
 use crate::shared::errors::AppError;
 use crate::shared::extractors::AuthUser;
@@ -126,12 +125,20 @@ async fn register(
         service::create_email_verification(&state.pool, &body.email, &body.password, &state.config)
             .await?;
 
-    // Send verification email (fire and forget in background)
-    let config = state.config.clone();
-    let to = body.email.clone();
-    spawn_app_task("send_verification_email", async move {
-        email::send_verification_email(&to, &code, &config).await
-    });
+    if let Err(send_error) = email::send_verification_email(&body.email, &code, &state.config).await
+    {
+        if let Err(cleanup_error) =
+            service::clear_pending_email_verification(&state.pool, &body.email).await
+        {
+            tracing::error!(
+                email = %body.email,
+                error = %cleanup_error,
+                "failed to clean up pending registration verification after email send failure"
+            );
+        }
+
+        return Err(send_error);
+    }
 
     Ok(Json(MessageResponse {
         message: "Verification code sent to your email".to_string(),
@@ -156,13 +163,6 @@ async fn verify_email(
         service::verify_email_and_create_user(&state.pool, &body.email, &body.code, &state.config)
             .await?;
 
-    // Send welcome email in background
-    let config = state.config.clone();
-    let to = body.email.clone();
-    spawn_app_task("send_welcome_email", async move {
-        email::send_welcome_email(&to, &config).await
-    });
-
     Ok(Json(response))
 }
 
@@ -181,13 +181,6 @@ async fn login(
     apply_ip_and_email_limit(&state, "login", &client_ip, &body.email, 20, 10).await?;
 
     let tokens = service::login(&state.pool, &body.email, &body.password, &state.config).await?;
-
-    // Send login notification in background
-    let config = state.config.clone();
-    let to = body.email.clone();
-    spawn_app_task("send_login_notification", async move {
-        email::send_login_notification(&to, &config).await
-    });
 
     // Set refresh token as HttpOnly cookie
     let cookie = build_refresh_cookie(

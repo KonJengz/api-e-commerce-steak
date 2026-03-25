@@ -7,6 +7,8 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::AppState;
+use crate::shared::background::spawn_app_task;
+use crate::shared::email;
 use crate::shared::errors::AppError;
 use crate::shared::extractors::AuthUser;
 use crate::shared::pagination::{PaginatedResponse, PaginationQuery};
@@ -30,7 +32,22 @@ async fn create_order(
     body.validate()
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
+    let user_email = sqlx::query_scalar::<_, String>("SELECT email FROM users WHERE id = $1")
+        .bind(auth.user_id)
+        .fetch_one(&state.pool)
+        .await?;
+
     let order = service::create_order(&state.pool, auth.user_id, &body).await?;
+
+    // Send order confirmation email in background
+    let config = state.config.clone();
+    let order_id = order.id.to_string();
+    let total = order.total_amount.to_string();
+
+    spawn_app_task("send_order_confirmation", async move {
+        email::send_order_confirmation(&user_email, &order_id, &total, &config).await
+    });
+
     Ok(Json(order))
 }
 

@@ -35,9 +35,6 @@ rand = "0.8"
 # UUID v7
 uuid = { version = "1", features = ["v7", "serde"] }
 
-# Email
-lettre = { version = "0.11", features = ["tokio1-native-tls", "builder"] }
-
 # Config
 dotenvy = "0.15"
 

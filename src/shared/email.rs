@@ -1,10 +1,29 @@
-use lettre::{
-    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor, message::header::ContentType,
-    transport::smtp::authentication::Credentials,
-};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
+use serde::{Deserialize, Serialize};
 
 use crate::config::AppConfig;
 use crate::shared::errors::AppError;
+
+const RESEND_EMAILS_API_URL: &str = "https://api.resend.com/emails";
+
+#[derive(Debug, Serialize)]
+struct ResendEmailRequest<'a> {
+    from: &'a str,
+    to: Vec<&'a str>,
+    subject: &'a str,
+    html: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResendEmailResponse {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResendErrorResponse {
+    message: Option<String>,
+    name: Option<String>,
+}
 
 /// Send a verification email with a 6-digit code
 pub async fn send_verification_email(
@@ -31,76 +50,91 @@ pub async fn send_verification_email(
     send_email(to, subject, &body, config).await
 }
 
-/// Send a welcome email after successful verification
-pub async fn send_welcome_email(to: &str, config: &AppConfig) -> Result<(), AppError> {
-    let subject = "Welcome to our store!";
-    let body = r#"<html>
-<body style="font-family: Arial, sans-serif; padding: 20px;">
-    <h2>Welcome! 🎉</h2>
-    <p>Your email has been verified and your account is now active.</p>
-    <p>Start exploring our products and enjoy shopping!</p>
+/// Send an order confirmation email
+pub async fn send_order_confirmation(
+    to: &str,
+    order_id: &str,
+    total: &str,
+    config: &AppConfig,
+) -> Result<(), AppError> {
+    let subject = format!("Order Confirmation - #{}", order_id);
+    let body = format!(
+        r#"<html>
+<body style="font-family: Arial, sans-serif; padding: 20px; line-height: 1.6;">
+    <h2 style="color: #4f46e5;">Thank you for your order! 🎉</h2>
+    <p>Your order <strong>#{}</strong> has been successfully placed.</p>
+    <div style="background: #f8fafc; padding: 15px; border-radius: 8px; margin: 20px 0;">
+        <p style="margin: 0;">Total amount paid: <strong style="font-size: 18px; color: #0f172a;">฿{}</strong></p>
+    </div>
+    <p>We will notify you once your order is shipped.</p>
 </body>
-</html>"#
-        .to_string();
+</html>"#,
+        order_id, total
+    );
 
-    send_email(to, subject, &body, config).await
+    send_email(to, &subject, &body, config).await
 }
 
-/// Send a login notification email
-pub async fn send_login_notification(to: &str, config: &AppConfig) -> Result<(), AppError> {
-    let subject = "New login to your account";
-    let body = r#"<html>
-<body style="font-family: Arial, sans-serif; padding: 20px;">
-    <h2>Login Notification</h2>
-    <p>A new login to your account was detected.</p>
-    <p>If this wasn't you, please change your password immediately.</p>
-</body>
-</html>"#
-        .to_string();
-
-    send_email(to, subject, &body, config).await
-}
-
-/// Internal helper to send an email via SMTP
+/// Internal helper to send an email via Resend API
 async fn send_email(
     to: &str,
     subject: &str,
     html_body: &str,
     config: &AppConfig,
 ) -> Result<(), AppError> {
-    let email = Message::builder()
-        .from(
-            config
-                .smtp_from
-                .parse()
-                .map_err(|e| AppError::Internal(format!("Invalid from address: {}", e)))?,
-        )
-        .to(to
-            .parse()
-            .map_err(|e| AppError::Internal(format!("Invalid to address: {}", e)))?)
-        .subject(subject)
-        .header(ContentType::TEXT_HTML)
-        .body(html_body.to_string())?;
-
-    let creds = Credentials::new(config.smtp_username.clone(), config.smtp_password.clone());
-
-    // Port 465 = Implicit TLS (used by Resend, AWS SES, etc.)
-    // Port 587 = STARTTLS (used by Gmail, traditional providers)
-    let mailer = if config.smtp_port == 465 {
-        AsyncSmtpTransport::<Tokio1Executor>::relay(&config.smtp_host)
-            .map_err(|e| AppError::Internal(format!("SMTP relay error: {}", e)))?
-            .credentials(creds)
-            .port(config.smtp_port)
-            .build()
-    } else {
-        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_host)
-            .map_err(|e| AppError::Internal(format!("SMTP relay error: {}", e)))?
-            .credentials(creds)
-            .port(config.smtp_port)
-            .build()
+    let client = reqwest::Client::new();
+    let payload = ResendEmailRequest {
+        from: config.email_from.as_str(),
+        to: vec![to],
+        subject,
+        html: html_body,
     };
 
-    mailer.send(email).await?;
+    let response = client
+        .post(RESEND_EMAILS_API_URL)
+        .header(AUTHORIZATION, format!("Bearer {}", config.resend_api_key))
+        .header(
+            USER_AGENT,
+            concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")),
+        )
+        .header(CONTENT_TYPE, "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| {
+            tracing::error!(error = ?error, "failed to reach Resend API");
+            AppError::Internal("Failed to reach Resend API".to_string())
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_body = response
+            .json::<ResendErrorResponse>()
+            .await
+            .ok()
+            .and_then(|body| body.message.or(body.name))
+            .unwrap_or_else(|| "Unknown Resend API error".to_string());
+
+        tracing::error!(
+            status = %status,
+            error = %error_body,
+            "Resend API returned an error response"
+        );
+
+        return Err(AppError::Internal(
+            "Failed to send email via Resend".to_string(),
+        ));
+    }
+
+    let response_body = response
+        .json::<ResendEmailResponse>()
+        .await
+        .map_err(|error| {
+            tracing::error!(error = ?error, "failed to parse Resend API response");
+            AppError::Internal("Failed to parse Resend API response".to_string())
+        })?;
+
+    tracing::info!(email_id = %response_body.id, to = %to, "email sent via Resend");
 
     Ok(())
 }

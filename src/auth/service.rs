@@ -95,6 +95,19 @@ pub async fn create_email_verification(
     Ok(code)
 }
 
+/// Delete any pending registration verification for the given email.
+pub async fn clear_pending_email_verification(pool: &PgPool, email: &str) -> Result<(), AppError> {
+    let email = normalize_email(email)?;
+
+    sqlx::query("DELETE FROM email_verifications WHERE purpose = $1 AND email = $2")
+        .bind(EMAIL_VERIFICATION_PURPOSE_REGISTER)
+        .bind(email)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
 /// Verify email code and create user (does NOT return tokens — user must login separately)
 pub async fn verify_email_and_create_user(
     pool: &PgPool,

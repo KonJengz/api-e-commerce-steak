@@ -86,17 +86,3 @@ impl From<jsonwebtoken::errors::Error> for AppError {
         AppError::Unauthorized("Invalid or expired token".to_string())
     }
 }
-
-impl From<lettre::transport::smtp::Error> for AppError {
-    fn from(err: lettre::transport::smtp::Error) -> Self {
-        tracing::error!("SMTP error: {:?}", err);
-        AppError::Internal("Failed to send email".to_string())
-    }
-}
-
-impl From<lettre::error::Error> for AppError {
-    fn from(err: lettre::error::Error) -> Self {
-        tracing::error!("Email build error: {:?}", err);
-        AppError::Internal("Failed to build email".to_string())
-    }
-}

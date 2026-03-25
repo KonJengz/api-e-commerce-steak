@@ -20,7 +20,7 @@ REST API backend for an e-commerce platform built with Rust, Axum, and PostgreSQ
 - Axum
 - SQLx + PostgreSQL
 - Tokio
-- Lettre
+- Resend
 - Reqwest
 - Cloudinary
 
@@ -84,7 +84,7 @@ Required integrations in `.env`:
 
 - PostgreSQL
 - JWT secret
-- SMTP credentials
+- Resend API key and verified sender address
 - Google/GitHub OAuth credentials
 - Cloudinary credentials
 
@@ -113,6 +113,8 @@ LOG_JSON=true
 TRUST_PROXY_HEADERS=true
 COOKIE_SECURE=true
 APP_URL=https://your-frontend-domain
+RESEND_API_KEY=re_...
+EMAIL_FROM=noreply@yourdomain.com
 ```
 
 ### 3. Create Database and Run Migrations
@@ -213,10 +215,7 @@ The app starts a cleanup worker on boot. It currently handles:
 
 Email notifications are also dispatched asynchronously in detached app tasks for:
 
-- verification email
-- welcome email
-- login notification
-- email-change verification
+- order confirmation
 
 ## Security Notes
 
@@ -258,10 +257,11 @@ Important environment values:
 - `APP_URL=https://your-frontend-domain`
 - `DATABASE_URL_POOLED` or `DATABASE_URL`
 - `JWT_SECRET`
+- `RESEND_API_KEY`
+- `EMAIL_FROM`
 - `CLOUDINARY_CLOUD_NAME`
 - `CLOUDINARY_API_KEY`
 - `CLOUDINARY_API_SECRET`
-- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`
 
 Notes:
 
@@ -330,10 +330,11 @@ Important environment values:
 - `APP_URL=https://your-frontend-domain`
 - `DATABASE_URL_POOLED` or `DATABASE_URL` from Neon
 - `JWT_SECRET`
+- `RESEND_API_KEY`
+- `EMAIL_FROM`
 - `CLOUDINARY_CLOUD_NAME`
 - `CLOUDINARY_API_KEY`
 - `CLOUDINARY_API_SECRET`
-- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`
 
 Notes:
 

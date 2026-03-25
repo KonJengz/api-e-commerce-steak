@@ -80,6 +80,26 @@ pub async fn request_email_change(
     Ok(code)
 }
 
+/// Delete any pending email-change verification for the given user/email pair.
+pub async fn clear_pending_email_change_verification(
+    pool: &PgPool,
+    user_id: Uuid,
+    email: &str,
+) -> Result<(), AppError> {
+    let email = normalize_email(email)?;
+
+    sqlx::query(
+        "DELETE FROM email_verifications WHERE purpose = $1 AND user_id = $2 AND email = $3",
+    )
+    .bind(EMAIL_VERIFICATION_PURPOSE_EMAIL_CHANGE)
+    .bind(user_id)
+    .bind(email)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 /// Verify a pending email change and update the user's profile.
 pub async fn verify_email_change(
     pool: &PgPool,

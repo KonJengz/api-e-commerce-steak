@@ -11,7 +11,7 @@ use validator::Validate;
 
 use crate::AppState;
 use crate::auth::model::MessageResponse;
-use crate::shared::background::spawn_app_task;
+use crate::shared::email;
 use crate::shared::errors::AppError;
 use crate::shared::extractors::AuthUser;
 use crate::shared::http::client_ip;
@@ -81,11 +81,22 @@ async fn request_email_change(
     let code = service::request_email_change(&state.pool, auth.user_id, &body.email, &state.config)
         .await?;
 
-    let config = state.config.clone();
-    let to = body.email.clone();
-    spawn_app_task("send_email_change_verification", async move {
-        crate::shared::email::send_verification_email(&to, &code, &config).await
-    });
+    if let Err(send_error) = email::send_verification_email(&body.email, &code, &state.config).await
+    {
+        if let Err(cleanup_error) =
+            service::clear_pending_email_change_verification(&state.pool, auth.user_id, &body.email)
+                .await
+        {
+            tracing::error!(
+                user_id = %auth.user_id,
+                email = %body.email,
+                error = %cleanup_error,
+                "failed to clean up pending email-change verification after email send failure"
+            );
+        }
+
+        return Err(send_error);
+    }
 
     Ok(Json(MessageResponse {
         message: "Verification code sent to your new email address".to_string(),

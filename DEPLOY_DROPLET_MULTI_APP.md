@@ -101,6 +101,13 @@ SERVICE_NAME=my-shop-api docker compose --env-file .env.droplet -f compose.dropl
 
 Then point the Caddy site file at `my-shop-api:8000`.
 
+For later updates from GitHub on the Droplet:
+
+```bash
+chmod +x scripts/deploy-droplet.sh
+COMPOSE_FILE=compose.droplet.app.yml ./scripts/deploy-droplet.sh
+```
+
 ## 4. Add Another Backend Later
 
 For each additional backend:

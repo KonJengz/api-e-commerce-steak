@@ -293,6 +293,19 @@ docker compose --env-file .env.droplet -f compose.droplet.yml up -d --build
 
 Use a real domain in `API_HOSTNAME` and run migrations before the first deploy.
 
+After the first deploy on a Droplet, updates can be applied with one command:
+
+```bash
+chmod +x scripts/deploy-droplet.sh
+./scripts/deploy-droplet.sh
+```
+
+For the shared-proxy pattern, use:
+
+```bash
+COMPOSE_FILE=compose.droplet.app.yml ./scripts/deploy-droplet.sh
+```
+
 If you want to host multiple backends on one Droplet, use the shared-proxy pattern in [DEPLOY_DROPLET_MULTI_APP.md](/Users/thaweevitkittanmete/Desktop/konjeng/Developer/project-e-commerce-2026/backend-rust-2/DEPLOY_DROPLET_MULTI_APP.md) instead of binding `80/443` in every app stack.
 
 ### DigitalOcean App Platform

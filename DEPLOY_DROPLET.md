@@ -117,8 +117,23 @@ curl https://api.example.com/readyz
 ## 9. Updating the App
 
 ```bash
-git pull
-docker compose --env-file .env.droplet -f compose.droplet.yml up -d --build
+chmod +x scripts/deploy-droplet.sh
+./scripts/deploy-droplet.sh
+```
+
+This script:
+
+- runs `git fetch` + `git pull --ff-only`
+- rebuilds and restarts the Docker Compose stack
+- prints container status
+- prints recent logs for the `api` service
+
+Useful overrides:
+
+```bash
+BRANCH=main ./scripts/deploy-droplet.sh
+LOG_SERVICE=caddy ./scripts/deploy-droplet.sh
+SKIP_PULL=1 ./scripts/deploy-droplet.sh
 ```
 
 ## 10. Useful Operations

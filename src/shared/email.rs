@@ -84,11 +84,21 @@ async fn send_email(
 
     let creds = Credentials::new(config.smtp_username.clone(), config.smtp_password.clone());
 
-    let mailer = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_host)
-        .map_err(|e| AppError::Internal(format!("SMTP relay error: {}", e)))?
-        .credentials(creds)
-        .port(config.smtp_port)
-        .build();
+    // Port 465 = Implicit TLS (used by Resend, AWS SES, etc.)
+    // Port 587 = STARTTLS (used by Gmail, traditional providers)
+    let mailer = if config.smtp_port == 465 {
+        AsyncSmtpTransport::<Tokio1Executor>::relay(&config.smtp_host)
+            .map_err(|e| AppError::Internal(format!("SMTP relay error: {}", e)))?
+            .credentials(creds)
+            .port(config.smtp_port)
+            .build()
+    } else {
+        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_host)
+            .map_err(|e| AppError::Internal(format!("SMTP relay error: {}", e)))?
+            .credentials(creds)
+            .port(config.smtp_port)
+            .build()
+    };
 
     mailer.send(email).await?;
 

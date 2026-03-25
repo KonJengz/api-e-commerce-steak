@@ -264,6 +264,11 @@ pub async fn google_login(
             if !is_active {
                 return Err(AppError::Forbidden("Account is suspended".to_string()));
             }
+            // Auto-verify the email if they log in via Google
+            sqlx::query("UPDATE users SET is_verified = TRUE WHERE id = $1 AND is_verified = FALSE")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
             (id, role, is_active)
         }
         None => {
@@ -416,6 +421,11 @@ pub async fn github_login(
             if !is_active {
                 return Err(AppError::Forbidden("Account is suspended".to_string()));
             }
+            // Auto-verify the email if they log in via GitHub
+            sqlx::query("UPDATE users SET is_verified = TRUE WHERE id = $1 AND is_verified = FALSE")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
             (id, role, is_active)
         }
         None => {

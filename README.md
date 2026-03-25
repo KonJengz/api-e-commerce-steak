@@ -90,6 +90,12 @@ PRODUCT_IMAGE_UPLOAD_TTL_MINUTES=60
 COOKIE_SECURE=false
 ```
 
+Database URL behavior:
+
+- `DATABASE_URL`: default URL used by local development and SQLx CLI
+- `DATABASE_URL_POOLED`: optional runtime URL, preferred by the app if present
+- `DATABASE_URL_DIRECT`: optional direct URL for admin tools such as `reset_db`
+
 Production baseline:
 
 ```bash
@@ -112,6 +118,29 @@ If the database already exists:
 ```bash
 sqlx migrate run
 ```
+
+### Neon Setup
+
+If you want to try this project on Neon:
+
+1. Create a Neon project
+2. Copy the direct connection string from Neon
+3. Put the direct URL in `DATABASE_URL`
+4. Optionally put Neon pooled URL in `DATABASE_URL_POOLED`
+
+Example:
+
+```env
+DATABASE_URL=postgresql://user:password@ep-example.us-east-2.aws.neon.tech/neondb?sslmode=require
+DATABASE_URL_DIRECT=postgresql://user:password@ep-example.us-east-2.aws.neon.tech/neondb?sslmode=require
+DATABASE_URL_POOLED=postgresql://user:password@ep-example-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require
+```
+
+Recommended usage with Neon:
+
+- use `DATABASE_URL` or `DATABASE_URL_DIRECT` for `sqlx migrate run`
+- use `DATABASE_URL_POOLED` for the running API if you want pooled runtime connections
+- keep migrations and schema tools on the direct URL
 
 ### 4. Start the API
 

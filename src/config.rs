@@ -71,7 +71,7 @@ impl AppConfig {
 
         let config = Self {
             app_env,
-            database_url: env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
+            database_url: runtime_database_url_from_env(),
             database_max_connections: parse_u32_env("DATABASE_MAX_CONNECTIONS", 10),
             database_acquire_timeout_seconds: parse_u64_env("DATABASE_ACQUIRE_TIMEOUT_SECONDS", 30),
             jwt_secret: env::var("JWT_SECRET").expect("JWT_SECRET must be set"),
@@ -159,6 +159,13 @@ impl AppConfig {
             );
         }
     }
+}
+
+fn runtime_database_url_from_env() -> String {
+    env::var("DATABASE_URL_POOLED")
+        .or_else(|_| env::var("DATABASE_URL"))
+        .or_else(|_| env::var("DATABASE_URL_DIRECT"))
+        .expect("DATABASE_URL, DATABASE_URL_POOLED, or DATABASE_URL_DIRECT must be set")
 }
 
 fn parse_bool_env(name: &str, default: bool) -> bool {

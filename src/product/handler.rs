@@ -10,7 +10,7 @@ use crate::AppState;
 use crate::shared::cloudinary;
 use crate::shared::errors::AppError;
 use crate::shared::extractors::AdminUser;
-use crate::shared::pagination::{PaginatedResponse, PaginationQuery};
+use crate::shared::pagination::PaginatedResponse;
 
 use super::model::*;
 use super::service;
@@ -43,8 +43,16 @@ pub fn router() -> Router<AppState> {
 /// GET /api/products (public)
 async fn list_products(
     State(state): State<AppState>,
-    Query(query): Query<PaginationQuery>,
+    Query(query): Query<ProductFilterQuery>,
 ) -> Result<Json<PaginatedResponse<Product>>, AppError> {
+    if let (Some(min_price), Some(max_price)) = (query.min_price, query.max_price)
+        && min_price > max_price
+    {
+        return Err(AppError::BadRequest(
+            "min_price must be less than or equal to max_price".to_string(),
+        ));
+    }
+
     let products = service::list_products(&state.pool, query).await?;
     Ok(Json(products))
 }

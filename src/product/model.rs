@@ -9,6 +9,8 @@ pub struct Product {
     pub id: Uuid,
     pub name: String,
     pub description: Option<String>,
+    pub category_id: Option<Uuid>,
+    pub category_name: Option<String>,
     pub image_url: Option<String>,
     pub image_public_id: Option<String>,
     pub current_price: Decimal,
@@ -44,6 +46,7 @@ pub struct CreateProductRequest {
     pub image_public_id: Option<String>,
     pub current_price: Decimal,
     pub stock: Option<i32>,
+    pub category_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize, Validate)]
@@ -64,6 +67,33 @@ pub struct UpdateProductRequest {
     pub current_price: Option<Decimal>,
     pub stock: Option<i32>,
     pub is_active: Option<bool>,
+    pub category_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProductFilterQuery {
+    pub search: Option<String>,
+    pub category_id: Option<Uuid>,
+    pub min_price: Option<Decimal>,
+    pub max_price: Option<Decimal>,
+    pub in_stock: Option<bool>,
+    pub sort: Option<String>,
+    pub page: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+impl ProductFilterQuery {
+    pub fn page(&self) -> i64 {
+        self.page.unwrap_or(1).max(1)
+    }
+
+    pub fn limit(&self) -> i64 {
+        self.limit.unwrap_or(10).clamp(1, 100)
+    }
+
+    pub fn offset(&self) -> i64 {
+        (self.page() - 1) * self.limit()
+    }
 }
 
 #[derive(Debug, Deserialize, Validate)]

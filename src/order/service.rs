@@ -124,6 +124,9 @@ pub async fn create_order(
     .execute(&mut *tx)
     .await?;
 
+    // Clear the user's shopping cart after successful checkout
+    crate::cart::service::clear_cart_by_user_id_tx(&mut tx, user_id).await?;
+
     // Commit transaction
     tx.commit()
         .await

@@ -1,36 +1,97 @@
 use chrono::{Duration, Utc};
-use sqlx::{Executor, PgPool, Postgres, Transaction};
+use sqlx::{Executor, PgPool, Postgres, QueryBuilder, Transaction};
 use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::config::AppConfig;
 use crate::shared::errors::AppError;
-use crate::shared::pagination::{PaginatedResponse, PaginationQuery};
+use crate::shared::pagination::PaginatedResponse;
 
 use super::model::{
-    AttachProductImageRequest, CreateProductRequest, Product, ProductImage,
+    AttachProductImageRequest, CreateProductRequest, Product, ProductFilterQuery, ProductImage,
     ProductImageMutationResponse, ReorderProductImagesRequest, UpdateProductRequest,
 };
 
-/// List all active products
+/// List all active products with filters
 pub async fn list_products(
     pool: &PgPool,
-    query: PaginationQuery,
+    query: ProductFilterQuery,
 ) -> Result<PaginatedResponse<Product>, AppError> {
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM products WHERE is_active = TRUE")
-        .fetch_one(pool)
-        .await?;
+    let mut count_query =
+        QueryBuilder::new("SELECT COUNT(*) FROM products p WHERE p.is_active = TRUE ");
+    let mut data_query = QueryBuilder::new(
+        "SELECT p.id, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at 
+         FROM products p 
+         LEFT JOIN categories c ON p.category_id = c.id 
+         WHERE p.is_active = TRUE ",
+    );
 
-    let products = sqlx::query_as::<_, Product>(
-        r#"SELECT id, name, description, image_url, image_public_id, current_price, stock, is_active, created_at, updated_at
-           FROM products WHERE is_active = TRUE
-           ORDER BY created_at DESC
-           LIMIT $1 OFFSET $2"#,
-    )
-    .bind(query.limit())
-    .bind(query.offset())
-    .fetch_all(pool)
-    .await?;
+    if let Some(search) = &query.search
+        && !search.trim().is_empty()
+    {
+        let search_term = format!("%{}%", search.trim());
+        count_query.push(" AND (p.name ILIKE ");
+        count_query.push_bind(search_term.clone());
+        count_query.push(" OR p.description ILIKE ");
+        count_query.push_bind(search_term.clone());
+        count_query.push(") ");
+
+        data_query.push(" AND (p.name ILIKE ");
+        data_query.push_bind(search_term.clone());
+        data_query.push(" OR p.description ILIKE ");
+        data_query.push_bind(search_term);
+        data_query.push(") ");
+    }
+
+    if let Some(category_id) = query.category_id {
+        count_query.push(" AND p.category_id = ");
+        count_query.push_bind(category_id);
+
+        data_query.push(" AND p.category_id = ");
+        data_query.push_bind(category_id);
+    }
+
+    if let Some(min_price) = query.min_price {
+        count_query.push(" AND p.current_price >= ");
+        count_query.push_bind(min_price);
+
+        data_query.push(" AND p.current_price >= ");
+        data_query.push_bind(min_price);
+    }
+
+    if let Some(max_price) = query.max_price {
+        count_query.push(" AND p.current_price <= ");
+        count_query.push_bind(max_price);
+
+        data_query.push(" AND p.current_price <= ");
+        data_query.push_bind(max_price);
+    }
+
+    if let Some(in_stock) = query.in_stock
+        && in_stock
+    {
+        count_query.push(" AND p.stock > 0 ");
+        data_query.push(" AND p.stock > 0 ");
+    }
+
+    match query.sort.as_deref() {
+        Some("price_asc") => data_query.push(" ORDER BY p.current_price ASC "),
+        Some("price_desc") => data_query.push(" ORDER BY p.current_price DESC "),
+        Some("created_asc") => data_query.push(" ORDER BY p.created_at ASC "),
+        Some("created_desc") => data_query.push(" ORDER BY p.created_at DESC "),
+        _ => data_query.push(" ORDER BY p.created_at DESC "),
+    };
+
+    data_query.push(" LIMIT ");
+    data_query.push_bind(query.limit());
+    data_query.push(" OFFSET ");
+    data_query.push_bind(query.offset());
+
+    let total: i64 = count_query.build_query_scalar().fetch_one(pool).await?;
+    let products = data_query
+        .build_query_as::<Product>()
+        .fetch_all(pool)
+        .await?;
 
     Ok(PaginatedResponse::new(
         products,
@@ -43,8 +104,10 @@ pub async fn list_products(
 /// Get a product by ID
 pub async fn get_product(pool: &PgPool, product_id: Uuid) -> Result<Product, AppError> {
     let product = sqlx::query_as::<_, Product>(
-        r#"SELECT id, name, description, image_url, image_public_id, current_price, stock, is_active, created_at, updated_at
-           FROM products WHERE id = $1 AND is_active = TRUE"#,
+        r#"SELECT p.id, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
+           FROM products p
+           LEFT JOIN categories c ON p.category_id = c.id
+           WHERE p.id = $1 AND p.is_active = TRUE"#,
     )
     .bind(product_id)
     .fetch_optional(pool)
@@ -57,8 +120,10 @@ pub async fn get_product(pool: &PgPool, product_id: Uuid) -> Result<Product, App
 /// Get a product by ID regardless of active status (admin/internal use)
 pub async fn get_product_for_admin(pool: &PgPool, product_id: Uuid) -> Result<Product, AppError> {
     let product = sqlx::query_as::<_, Product>(
-        r#"SELECT id, name, description, image_url, image_public_id, current_price, stock, is_active, created_at, updated_at
-           FROM products WHERE id = $1"#,
+        r#"SELECT p.id, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
+           FROM products p
+           LEFT JOIN categories c ON p.category_id = c.id
+           WHERE p.id = $1"#,
     )
     .bind(product_id)
     .fetch_optional(pool)
@@ -82,6 +147,10 @@ pub async fn create_product(
     admin_user_id: Uuid,
     config: &AppConfig,
 ) -> Result<Product, AppError> {
+    if let Some(category_id) = req.category_id {
+        ensure_category_exists(pool, category_id).await?;
+    }
+
     let id = Uuid::now_v7();
     let now = Utc::now();
     let stock = req.stock.unwrap_or(0);
@@ -103,13 +172,19 @@ pub async fn create_product(
     };
 
     let product = sqlx::query_as::<_, Product>(
-        r#"INSERT INTO products (id, name, description, image_url, image_public_id, current_price, stock, is_active, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, $8, $8)
-           RETURNING id, name, description, image_url, image_public_id, current_price, stock, is_active, created_at, updated_at"#,
+        r#"WITH inserted AS (
+               INSERT INTO products (id, name, description, category_id, image_url, image_public_id, current_price, stock, is_active, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, $9, $9)
+               RETURNING *
+           )
+           SELECT i.id, i.name, i.description, i.category_id, c.name as category_name, i.image_url, i.image_public_id, i.current_price, i.stock, i.is_active, i.created_at, i.updated_at
+           FROM inserted i
+           LEFT JOIN categories c ON i.category_id = c.id"#,
     )
     .bind(id)
     .bind(&req.name)
     .bind(&req.description)
+    .bind(req.category_id)
     .bind(&req.image_url)
     .bind(&req.image_public_id)
     .bind(req.current_price)
@@ -145,6 +220,10 @@ pub async fn update_product(
     admin_user_id: Uuid,
     config: &AppConfig,
 ) -> Result<Product, AppError> {
+    if let Some(category_id) = req.category_id {
+        ensure_category_exists(pool, category_id).await?;
+    }
+
     let mut tx = pool.begin().await?;
     let existing_product = lock_product_for_update(&mut tx, product_id).await?;
     let incoming_image_public_id = req.image_public_id.as_deref();
@@ -180,14 +259,16 @@ pub async fn update_product(
             current_price = COALESCE($3, current_price),
             stock = COALESCE($4, stock),
             is_active = COALESCE($5, is_active),
-            updated_at = $6
-           WHERE id = $7"#,
+            category_id = COALESCE($6, category_id),
+            updated_at = $7
+           WHERE id = $8"#,
     )
     .bind(&req.name)
     .bind(&req.description)
     .bind(req.current_price)
     .bind(req.stock)
     .bind(req.is_active)
+    .bind(req.category_id)
     .bind(Utc::now())
     .bind(product_id)
     .execute(&mut *tx)
@@ -210,6 +291,20 @@ pub async fn update_product(
     tx.commit().await?;
 
     Ok(product)
+}
+
+async fn ensure_category_exists(pool: &PgPool, category_id: Uuid) -> Result<(), AppError> {
+    let exists =
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM categories WHERE id = $1)")
+            .bind(category_id)
+            .fetch_one(pool)
+            .await?;
+
+    if !exists {
+        return Err(AppError::NotFound("Category not found".to_string()));
+    }
+
+    Ok(())
 }
 
 pub async fn attach_product_image(
@@ -419,9 +514,10 @@ where
     E: Executor<'e, Database = Postgres>,
 {
     let product = sqlx::query_as::<_, Product>(
-        r#"SELECT id, name, description, image_url, image_public_id, current_price, stock, is_active, created_at, updated_at
-           FROM products
-           WHERE id = $1"#,
+        r#"SELECT p.id, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
+           FROM products p
+           LEFT JOIN categories c ON p.category_id = c.id
+           WHERE p.id = $1"#,
     )
     .bind(product_id)
     .fetch_optional(executor)
@@ -436,10 +532,11 @@ async fn lock_product_for_update(
     product_id: Uuid,
 ) -> Result<Product, AppError> {
     let product = sqlx::query_as::<_, Product>(
-        r#"SELECT id, name, description, image_url, image_public_id, current_price, stock, is_active, created_at, updated_at
-           FROM products
-           WHERE id = $1
-           FOR UPDATE"#,
+        r#"SELECT p.id, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
+           FROM products p
+           LEFT JOIN categories c ON p.category_id = c.id
+           WHERE p.id = $1
+           FOR UPDATE OF p"#,
     )
     .bind(product_id)
     .fetch_optional(&mut **tx)
@@ -540,12 +637,17 @@ async fn sync_product_primary_image(
     .await?;
 
     let product = sqlx::query_as::<_, Product>(
-        r#"UPDATE products
-           SET image_url = $1,
-               image_public_id = $2,
-               updated_at = $3
-           WHERE id = $4
-           RETURNING id, name, description, image_url, image_public_id, current_price, stock, is_active, created_at, updated_at"#,
+        r#"WITH updated AS (
+               UPDATE products
+               SET image_url = $1,
+                   image_public_id = $2,
+                   updated_at = $3
+               WHERE id = $4
+               RETURNING *
+           )
+           SELECT u.id, u.name, u.description, u.category_id, c.name as category_name, u.image_url, u.image_public_id, u.current_price, u.stock, u.is_active, u.created_at, u.updated_at
+           FROM updated u
+           LEFT JOIN categories c ON u.category_id = c.id"#,
     )
     .bind(primary_image.as_ref().map(|image| image.image_url.as_str()))
     .bind(primary_image.as_ref().map(|image| image.image_public_id.as_str()))
@@ -572,12 +674,17 @@ async fn delete_product_image_internal(
             && (existing_product.image_url.is_some() || existing_product.image_public_id.is_some())
         {
             let product = sqlx::query_as::<_, Product>(
-                r#"UPDATE products
-                   SET image_url = NULL,
-                       image_public_id = NULL,
-                       updated_at = $1
-                   WHERE id = $2
-                   RETURNING id, name, description, image_url, image_public_id, current_price, stock, is_active, created_at, updated_at"#,
+                r#"WITH updated AS (
+                       UPDATE products
+                       SET image_url = NULL,
+                           image_public_id = NULL,
+                           updated_at = $1
+                       WHERE id = $2
+                       RETURNING *
+                   )
+                   SELECT u.id, u.name, u.description, u.category_id, c.name as category_name, u.image_url, u.image_public_id, u.current_price, u.stock, u.is_active, u.created_at, u.updated_at
+                   FROM updated u
+                   LEFT JOIN categories c ON u.category_id = c.id"#,
             )
             .bind(Utc::now())
             .bind(product_id)

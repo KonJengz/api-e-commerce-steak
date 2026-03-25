@@ -1,5 +1,7 @@
 mod address;
 mod auth;
+mod cart;
+mod category;
 mod config;
 mod health;
 mod order;
@@ -78,6 +80,8 @@ async fn main() {
         .nest("/api/auth", auth::handler::router())
         .nest("/api/users", user::handler::router())
         .nest("/api/addresses", address::handler::router())
+        .nest("/api/carts", cart::handler::router())
+        .nest("/api/categories", category::handler::router())
         .nest("/api/products", product::handler::router())
         .nest("/api/orders", order::handler::router())
         .layer(cors)

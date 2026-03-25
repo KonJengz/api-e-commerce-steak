@@ -16,6 +16,7 @@ use super::model::{AuthTokens, MessageResponse, UserInfo};
 
 const EMAIL_VERIFICATION_EXPIRY_MINUTES: i64 = 15;
 const MAX_EMAIL_VERIFICATION_ATTEMPTS: i32 = 5;
+const OAUTH_LOGIN_TICKET_EXPIRY_MINUTES: i64 = 5;
 
 #[derive(Debug, Deserialize)]
 struct GoogleTokenInfo {
@@ -27,6 +28,11 @@ struct GoogleTokenInfo {
 #[derive(Debug, Deserialize)]
 struct GithubTokenResponse {
     access_token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleAuthorizationCodeResponse {
+    id_token: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -336,6 +342,16 @@ pub async fn google_login(
     })
 }
 
+pub async fn google_login_with_authorization_code(
+    pool: &PgPool,
+    code: &str,
+    redirect_uri: &str,
+    config: &AppConfig,
+) -> Result<AuthTokens, AppError> {
+    let id_token = exchange_google_authorization_code(code, redirect_uri, config).await?;
+    google_login(pool, &id_token, config).await
+}
+
 /// Authenticate user via GitHub Authorization Code
 pub async fn github_login(
     pool: &PgPool,
@@ -492,6 +508,80 @@ pub async fn github_login(
             email: primary_email,
             role,
         },
+    })
+}
+
+pub async fn create_oauth_login_ticket(
+    pool: &PgPool,
+    tokens: &AuthTokens,
+) -> Result<String, AppError> {
+    let ticket = Uuid::now_v7();
+    let expires_at = Utc::now() + Duration::minutes(OAUTH_LOGIN_TICKET_EXPIRY_MINUTES);
+
+    sqlx::query(
+        r#"INSERT INTO oauth_login_tickets
+           (id, access_token, refresh_token, user_id, expires_at)
+           VALUES ($1, $2, $3, $4, $5)"#,
+    )
+    .bind(ticket)
+    .bind(&tokens.access_token)
+    .bind(&tokens.refresh_token)
+    .bind(tokens.user.id)
+    .bind(expires_at)
+    .execute(pool)
+    .await?;
+
+    Ok(ticket.to_string())
+}
+
+pub async fn exchange_oauth_login_ticket(
+    pool: &PgPool,
+    ticket: &str,
+) -> Result<AuthTokens, AppError> {
+    let ticket_id = Uuid::parse_str(ticket)
+        .map_err(|_| AppError::BadRequest("Invalid OAuth login ticket".to_string()))?;
+
+    let mut tx = pool.begin().await?;
+
+    let record = sqlx::query_as::<_, (String, String, Uuid, chrono::DateTime<Utc>)>(
+        r#"DELETE FROM oauth_login_tickets
+           WHERE id = $1
+           RETURNING access_token, refresh_token, user_id, expires_at"#,
+    )
+    .bind(ticket_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| {
+        AppError::Unauthorized("OAuth login ticket is invalid or expired".to_string())
+    })?;
+
+    let (access_token, refresh_token, user_id, expires_at) = record;
+
+    if Utc::now() > expires_at {
+        tx.commit().await?;
+        return Err(AppError::Unauthorized(
+            "OAuth login ticket has expired".to_string(),
+        ));
+    }
+
+    let user = sqlx::query_as::<_, (Uuid, String, String)>(
+        r#"SELECT id, email, role
+           FROM users
+           WHERE id = $1 AND is_active = TRUE"#,
+    )
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::Unauthorized("User not found or inactive".to_string()))?;
+
+    tx.commit().await?;
+
+    let (id, email, role) = user;
+
+    Ok(AuthTokens {
+        access_token,
+        refresh_token,
+        user: UserInfo { id, email, role },
     })
 }
 
@@ -737,4 +827,40 @@ fn build_refresh_token_record(config: &AppConfig) -> (Uuid, String, String, chro
     let expires_at = Utc::now() + Duration::days(config.jwt_refresh_expiry_days);
 
     (id, token, token_hash, expires_at)
+}
+
+async fn exchange_google_authorization_code(
+    code: &str,
+    redirect_uri: &str,
+    config: &AppConfig,
+) -> Result<String, AppError> {
+    let client = reqwest::Client::new();
+
+    let token_res = client
+        .post("https://oauth2.googleapis.com/token")
+        .form(&[
+            ("code", code),
+            ("client_id", config.google_client_id.as_str()),
+            ("client_secret", config.google_client_secret.as_str()),
+            ("redirect_uri", redirect_uri),
+            ("grant_type", "authorization_code"),
+        ])
+        .send()
+        .await
+        .map_err(|e| AppError::Unauthorized(format!("Failed to retrieve Google token: {}", e)))?;
+
+    if !token_res.status().is_success() {
+        return Err(AppError::Unauthorized(
+            "Invalid Google authorization code".to_string(),
+        ));
+    }
+
+    let token_data: GoogleAuthorizationCodeResponse = token_res.json().await.map_err(|_| {
+        AppError::Unauthorized(
+            "Failed to parse Google token response. The code might be expired or invalid."
+                .to_string(),
+        )
+    })?;
+
+    Ok(token_data.id_token)
 }

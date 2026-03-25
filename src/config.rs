@@ -53,6 +53,7 @@ pub struct AppConfig {
     pub product_image_upload_ttl_minutes: i64,
     pub log_json: bool,
     pub google_client_id: String,
+    pub google_client_secret: String,
     pub github_client_id: String,
     pub github_client_secret: String,
     pub cloudinary_cloud_name: String,
@@ -86,6 +87,8 @@ impl AppConfig {
             log_json: parse_bool_env("LOG_JSON", log_json_default),
             google_client_id: env::var("GOOGLE_CLIENT_ID")
                 .unwrap_or_else(|_| "your-google-client-id".to_string()),
+            google_client_secret: env::var("GOOGLE_CLIENT_SECRET")
+                .unwrap_or_else(|_| "your-google-client-secret".to_string()),
             github_client_id: env::var("GITHUB_CLIENT_ID")
                 .unwrap_or_else(|_| "your-github-client-id".to_string()),
             github_client_secret: env::var("GITHUB_CLIENT_SECRET")
@@ -145,6 +148,12 @@ impl AppConfig {
                 !self.jwt_secret.contains("change-this")
                     && !self.jwt_secret.contains("your-super-secret"),
                 "JWT_SECRET must not use a placeholder value in production"
+            );
+            assert!(
+                !self
+                    .google_client_secret
+                    .contains("your-google-client-secret"),
+                "GOOGLE_CLIENT_SECRET must not use a placeholder value in production"
             );
             assert!(
                 !self.cloudinary_cloud_name.contains("your-cloud-name")

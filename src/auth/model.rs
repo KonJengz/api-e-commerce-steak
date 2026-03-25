@@ -39,6 +39,12 @@ pub struct GithubLoginRequest {
     pub code: String,
 }
 
+#[derive(Debug, Deserialize, Validate)]
+pub struct OauthExchangeRequest {
+    #[validate(length(min = 1, message = "Ticket cannot be empty"))]
+    pub ticket: String,
+}
+
 // ─── Response DTOs ──────────────────────────────────────────
 
 /// Auth response — refresh_token is sent as HttpOnly cookie, not in body

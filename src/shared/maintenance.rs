@@ -24,12 +24,14 @@ pub fn spawn_expired_data_cleanup(
                 Ok(stats) => {
                     if stats.deleted_refresh_tokens > 0
                         || stats.deleted_email_verifications > 0
+                        || stats.deleted_oauth_login_tickets > 0
                         || stats.deleted_pending_product_images > 0
                         || stats.deleted_pending_product_image_deletions > 0
                     {
                         tracing::info!(
                             deleted_refresh_tokens = stats.deleted_refresh_tokens,
                             deleted_email_verifications = stats.deleted_email_verifications,
+                            deleted_oauth_login_tickets = stats.deleted_oauth_login_tickets,
                             deleted_pending_product_images = stats.deleted_pending_product_images,
                             deleted_pending_product_image_deletions =
                                 stats.deleted_pending_product_image_deletions,
@@ -49,6 +51,7 @@ pub fn spawn_expired_data_cleanup(
 struct CleanupStats {
     deleted_refresh_tokens: u64,
     deleted_email_verifications: u64,
+    deleted_oauth_login_tickets: u64,
     deleted_pending_product_images: u64,
     deleted_pending_product_image_deletions: u64,
 }
@@ -73,6 +76,11 @@ async fn cleanup_expired_data(
 
     let email_verifications =
         sqlx::query("DELETE FROM email_verifications WHERE expires_at <= NOW()")
+            .execute(pool)
+            .await?;
+
+    let oauth_login_tickets =
+        sqlx::query("DELETE FROM oauth_login_tickets WHERE expires_at <= NOW()")
             .execute(pool)
             .await?;
 
@@ -142,6 +150,7 @@ async fn cleanup_expired_data(
     Ok(CleanupStats {
         deleted_refresh_tokens: refresh_tokens.rows_affected(),
         deleted_email_verifications: email_verifications.rows_affected(),
+        deleted_oauth_login_tickets: oauth_login_tickets.rows_affected(),
         deleted_pending_product_images,
         deleted_pending_product_image_deletions,
     })

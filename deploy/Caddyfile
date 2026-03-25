@@ -1,0 +1,13 @@
+{
+    email {$ACME_EMAIL}
+}
+
+{$API_HOSTNAME} {
+    encode zstd gzip
+
+    header {
+        -Server
+    }
+
+    reverse_proxy api:8000
+}

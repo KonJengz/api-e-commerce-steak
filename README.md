@@ -28,6 +28,7 @@ REST API backend for an e-commerce platform built with Rust, Axum, and PostgreSQ
 
 ```text
 backend-rust-2/
+├── deploy/                 # Reverse proxy and deployment helper files
 ├── migrations/             # Database schema and hardening migrations
 ├── src/
 │   ├── auth/               # Authentication and social login
@@ -40,7 +41,15 @@ backend-rust-2/
 │   ├── config.rs           # Environment configuration
 │   └── main.rs             # App bootstrap
 ├── API_DOCS.md             # Endpoint-level API reference
+├── DEPLOY_DROPLET.md       # Step-by-step Droplet deployment guide
+├── DEPLOY_DROPLET_MULTI_APP.md # Shared-proxy guide for multiple backends
 ├── .env.example            # Local environment template
+├── .env.droplet.example    # Production template for Docker Compose on a Droplet
+├── .env.proxy.example      # Shared proxy template for multi-app Droplets
+├── compose.droplet.app.yml # App-only stack for shared-proxy Droplets
+├── compose.droplet.yml     # Production Docker Compose stack
+├── compose.droplet.proxy.yml # Shared Caddy stack for multi-app Droplets
+├── Dockerfile              # Container image for Koyeb or self-hosting
 └── .github/workflows/ci.yml
 ```
 
@@ -228,6 +237,63 @@ Detailed endpoint documentation is in [API_DOCS.md](./API_DOCS.md).
 - Keep app, PostgreSQL, and Redis/Valkey in the same region if you later move rate limiting out of memory
 - Store secrets in platform secret management, not in committed files
 - Set real Cloudinary credentials in production
+
+### Koyeb
+
+This repository can be deployed to Koyeb using the included [Dockerfile](/Users/thaweevitkittanmete/Desktop/konjeng/Developer/project-e-commerce-2026/backend-rust-2/Dockerfile).
+
+Suggested Koyeb setup:
+
+- Deploy from GitHub
+- Builder: `Dockerfile`
+- Exposed HTTP port: `8000`
+- Health check path: `/readyz`
+
+Important environment values:
+
+- `APP_ENV=production`
+- `LOG_JSON=true`
+- `TRUST_PROXY_HEADERS=true`
+- `COOKIE_SECURE=true`
+- `APP_URL=https://your-frontend-domain`
+- `DATABASE_URL_POOLED` or `DATABASE_URL`
+- `JWT_SECRET`
+- `CLOUDINARY_CLOUD_NAME`
+- `CLOUDINARY_API_KEY`
+- `CLOUDINARY_API_SECRET`
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`
+
+Notes:
+
+- Koyeb free services can scale to zero, so background cleanup only runs while the web service is awake.
+- Run `sqlx migrate run` against your production database before first deploy or before enabling new schema-dependent features.
+
+### DigitalOcean Droplet
+
+This repository includes a production-oriented Docker Compose stack with Caddy for self-managed deployment on a Droplet.
+
+Files:
+
+- [compose.droplet.yml](/Users/thaweevitkittanmete/Desktop/konjeng/Developer/project-e-commerce-2026/backend-rust-2/compose.droplet.yml)
+- [deploy/Caddyfile](/Users/thaweevitkittanmete/Desktop/konjeng/Developer/project-e-commerce-2026/backend-rust-2/deploy/Caddyfile)
+- [.env.droplet.example](/Users/thaweevitkittanmete/Desktop/konjeng/Developer/project-e-commerce-2026/backend-rust-2/.env.droplet.example)
+- [DEPLOY_DROPLET.md](/Users/thaweevitkittanmete/Desktop/konjeng/Developer/project-e-commerce-2026/backend-rust-2/DEPLOY_DROPLET.md)
+- [compose.droplet.app.yml](/Users/thaweevitkittanmete/Desktop/konjeng/Developer/project-e-commerce-2026/backend-rust-2/compose.droplet.app.yml)
+- [compose.droplet.proxy.yml](/Users/thaweevitkittanmete/Desktop/konjeng/Developer/project-e-commerce-2026/backend-rust-2/compose.droplet.proxy.yml)
+- [.env.proxy.example](/Users/thaweevitkittanmete/Desktop/konjeng/Developer/project-e-commerce-2026/backend-rust-2/.env.proxy.example)
+- [deploy/proxy/Caddyfile](/Users/thaweevitkittanmete/Desktop/konjeng/Developer/project-e-commerce-2026/backend-rust-2/deploy/proxy/Caddyfile)
+- [DEPLOY_DROPLET_MULTI_APP.md](/Users/thaweevitkittanmete/Desktop/konjeng/Developer/project-e-commerce-2026/backend-rust-2/DEPLOY_DROPLET_MULTI_APP.md)
+
+Quick start:
+
+```bash
+cp .env.droplet.example .env.droplet
+docker compose --env-file .env.droplet -f compose.droplet.yml up -d --build
+```
+
+Use a real domain in `API_HOSTNAME` and run migrations before the first deploy.
+
+If you want to host multiple backends on one Droplet, use the shared-proxy pattern in [DEPLOY_DROPLET_MULTI_APP.md](/Users/thaweevitkittanmete/Desktop/konjeng/Developer/project-e-commerce-2026/backend-rust-2/DEPLOY_DROPLET_MULTI_APP.md) instead of binding `80/443` in every app stack.
 
 ### DigitalOcean App Platform
 

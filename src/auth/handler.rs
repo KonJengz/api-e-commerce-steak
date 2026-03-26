@@ -34,6 +34,7 @@ use super::service;
 
 const REFRESH_TOKEN_COOKIE: &str = "refresh_token";
 const AUTH_RATE_LIMIT_WINDOW_SECONDS: u64 = 15 * 60;
+const FORGOT_PASSWORD_EMAIL_COOLDOWN_SECONDS: u64 = 60;
 const OAUTH_STATE_COOKIE: &str = "oauth_state";
 const OAUTH_EXCHANGE_URL_COOKIE: &str = "oauth_exchange_url";
 const OAUTH_REDIRECT_TO_COOKIE: &str = "oauth_redirect_to";
@@ -405,6 +406,35 @@ async fn apply_ip_and_email_limit(
     .await
 }
 
+async fn apply_email_cooldown(
+    state: &AppState,
+    scope: &'static str,
+    email: &str,
+    window_seconds: u64,
+    message: &'static str,
+) -> Result<(), AppError> {
+    match state
+        .auth_rate_limiter
+        .check(
+            format!(
+                "auth:{}:cooldown:email:{}",
+                scope,
+                email.trim().to_ascii_lowercase()
+            ),
+            RateLimitRule {
+                max_attempts: 1,
+                window: Duration::from_secs(window_seconds),
+                scope,
+            },
+        )
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(AppError::TooManyRequests(_)) => Err(AppError::TooManyRequests(message.to_string())),
+        Err(other) => Err(other),
+    }
+}
+
 async fn register(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -541,6 +571,14 @@ async fn forgot_password(
 
     let email = body.email.trim();
     let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
+    apply_email_cooldown(
+        &state,
+        "forgot_password",
+        email,
+        FORGOT_PASSWORD_EMAIL_COOLDOWN_SECONDS,
+        "Please wait 60 seconds before requesting another password reset code.",
+    )
+    .await?;
     apply_ip_and_email_limit(&state, "forgot_password", &client_ip, email, 10, 3).await?;
 
     if let Some(code) = service::request_password_reset(&state.pool, email, &state.config).await?

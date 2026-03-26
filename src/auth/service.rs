@@ -23,9 +23,11 @@ const OAUTH_LOGIN_TICKET_EXPIRY_MINUTES: i64 = 5;
 struct GoogleTokenInfo {
     aud: String,
     email: String,
+    email_verified: bool,
     name: Option<String>,
     picture: Option<String>,
     sub: String,
+    nonce: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -514,6 +516,7 @@ pub async fn login(
 pub async fn google_login(
     pool: &PgPool,
     token: &str,
+    expected_nonce: Option<&str>,
     config: &AppConfig,
 ) -> Result<AuthTokens, AppError> {
     let client = reqwest::Client::new();
@@ -537,6 +540,18 @@ pub async fn google_login(
         return Err(AppError::Unauthorized(
             "Token was not issued for this app".to_string(),
         ));
+    }
+
+    if !token_info.email_verified {
+        return Err(AppError::Unauthorized(
+            "Google email is not verified".to_string(),
+        ));
+    }
+
+    if let Some(expected) = expected_nonce {
+        if token_info.nonce.as_deref() != Some(expected) {
+            return Err(AppError::Unauthorized("Invalid ID Token nonce".to_string()));
+        }
     }
 
     let email = normalize_email(&token_info.email)?;
@@ -625,10 +640,11 @@ pub async fn google_login_with_authorization_code(
     pool: &PgPool,
     code: &str,
     redirect_uri: &str,
+    nonce: Option<&str>,
     config: &AppConfig,
 ) -> Result<AuthTokens, AppError> {
     let id_token = exchange_google_authorization_code(code, redirect_uri, config).await?;
-    google_login(pool, &id_token, config).await
+    google_login(pool, &id_token, nonce, config).await
 }
 
 /// Authenticate user via GitHub Authorization Code

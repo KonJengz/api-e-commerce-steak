@@ -33,6 +33,7 @@ const AUTH_RATE_LIMIT_WINDOW_SECONDS: u64 = 15 * 60;
 const OAUTH_STATE_COOKIE: &str = "oauth_state";
 const OAUTH_EXCHANGE_URL_COOKIE: &str = "oauth_exchange_url";
 const OAUTH_REDIRECT_TO_COOKIE: &str = "oauth_redirect_to";
+const OAUTH_NONCE_COOKIE: &str = "oauth_nonce";
 const OAUTH_COOKIE_PATH: &str = "/api/auth";
 
 #[derive(Debug, Deserialize)]
@@ -52,6 +53,7 @@ struct OauthCallbackQuery {
 struct OauthFlow {
     exchange_url: String,
     redirect_to: String,
+    nonce: Option<String>,
 }
 
 pub fn router() -> Router<AppState> {
@@ -108,14 +110,9 @@ fn oauth_cookie_tombstone(name: &'static str, cookie_secure: bool) -> Cookie<'st
 
 fn clear_oauth_flow_cookies(jar: CookieJar, cookie_secure: bool) -> CookieJar {
     jar.remove(oauth_cookie_tombstone(OAUTH_STATE_COOKIE, cookie_secure))
-        .remove(oauth_cookie_tombstone(
-            OAUTH_EXCHANGE_URL_COOKIE,
-            cookie_secure,
-        ))
-        .remove(oauth_cookie_tombstone(
-            OAUTH_REDIRECT_TO_COOKIE,
-            cookie_secure,
-        ))
+        .remove(oauth_cookie_tombstone(OAUTH_EXCHANGE_URL_COOKIE, cookie_secure))
+        .remove(oauth_cookie_tombstone(OAUTH_REDIRECT_TO_COOKIE, cookie_secure))
+        .remove(oauth_cookie_tombstone(OAUTH_NONCE_COOKIE, cookie_secure))
 }
 
 fn normalize_redirect_to(redirect_to: Option<&str>) -> String {
@@ -207,6 +204,9 @@ fn oauth_flow_from_jar(jar: &CookieJar, state: Option<&str>) -> Result<OauthFlow
         jar.get(OAUTH_REDIRECT_TO_COOKIE)
             .map(|cookie| cookie.value()),
     );
+    let nonce = jar
+        .get(OAUTH_NONCE_COOKIE)
+        .map(|cookie| cookie.value().to_string());
 
     if expected_state.as_deref().is_none() || state.is_none() || expected_state.as_deref() != state
     {
@@ -218,6 +218,7 @@ fn oauth_flow_from_jar(jar: &CookieJar, state: Option<&str>) -> Result<OauthFlow
     Ok(OauthFlow {
         exchange_url,
         redirect_to,
+        nonce,
     })
 }
 
@@ -433,6 +434,7 @@ async fn google_start(
     let origin = backend_origin(&headers, state.config.trust_proxy_headers)?;
     let callback_url = provider_callback_url(&origin, "/api/auth/google/callback");
     let state_token = jwt::create_refresh_token();
+    let nonce = jwt::create_refresh_token();
 
     let mut authorize_url = Url::parse("https://accounts.google.com/o/oauth2/v2/auth")
         .map_err(|_| AppError::Internal("Failed to build Google authorize URL".to_string()))?;
@@ -443,7 +445,8 @@ async fn google_start(
         .append_pair("response_type", "code")
         .append_pair("scope", "openid email profile")
         .append_pair("prompt", "select_account")
-        .append_pair("state", &state_token);
+        .append_pair("state", &state_token)
+        .append_pair("nonce", &nonce);
 
     let jar = CookieJar::new()
         .add(oauth_cookie(
@@ -459,6 +462,11 @@ async fn google_start(
         .add(oauth_cookie(
             OAUTH_REDIRECT_TO_COOKIE,
             redirect_to,
+            state.config.cookie_secure,
+        ))
+        .add(oauth_cookie(
+            OAUTH_NONCE_COOKIE,
+            nonce,
             state.config.cookie_secure,
         ));
 
@@ -512,6 +520,7 @@ async fn google_callback(
         &state.pool,
         code,
         &callback_url,
+        flow.nonce.as_deref(),
         &state.config,
     )
     .await
@@ -551,7 +560,7 @@ async fn google_login(
     let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
     apply_ip_limit(&state, "google_login", &client_ip, 20).await?;
 
-    let tokens = service::google_login(&state.pool, &body.token, &state.config).await?;
+    let tokens = service::google_login(&state.pool, &body.token, None, &state.config).await?;
     let cookie = build_refresh_cookie(
         &tokens.refresh_token,
         state.config.jwt_refresh_expiry_days,

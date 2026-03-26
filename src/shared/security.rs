@@ -1,4 +1,5 @@
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 use validator::ValidateEmail;
 
 use super::errors::AppError;
@@ -80,8 +81,72 @@ pub fn hash_refresh_token(secret: &str, token: &str) -> String {
     hash_segments(secret, &["refresh_token", token])
 }
 
+pub fn hash_oauth_login_ticket(secret: &str, token: &str) -> String {
+    hash_segments(secret, &["oauth_login_ticket", token])
+}
+
+pub fn sign_oauth_link_user(secret: &str, user_id: Uuid) -> String {
+    let user_id = user_id.to_string();
+    let signature = hash_segments(secret, &["oauth_link_user", &user_id]);
+    format!("{}.{}", user_id, signature)
+}
+
+pub fn verify_oauth_link_user(secret: &str, signed_value: &str) -> Option<Uuid> {
+    let (user_id, signature) = signed_value.split_once('.')?;
+    let expected = hash_segments(secret, &["oauth_link_user", user_id]);
+
+    if signature != expected {
+        return None;
+    }
+
+    Uuid::parse_str(user_id).ok()
+}
+
 pub fn hash_verification_code(secret: &str, purpose: &str, email: &str, code: &str) -> String {
     hash_segments(secret, &["email_verification", purpose, email, code])
+}
+
+pub fn pkce_code_challenge_s256(verifier: &str) -> String {
+    let digest = Sha256::digest(verifier.as_bytes());
+    base64_url_no_pad(&digest)
+}
+
+fn base64_url_no_pad(bytes: &[u8]) -> String {
+    const BASE64_URL_TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+    let mut output = String::with_capacity((bytes.len() * 4).div_ceil(3));
+    let mut index = 0;
+
+    while index + 3 <= bytes.len() {
+        let chunk = ((bytes[index] as u32) << 16)
+            | ((bytes[index + 1] as u32) << 8)
+            | bytes[index + 2] as u32;
+
+        output.push(BASE64_URL_TABLE[((chunk >> 18) & 0x3f) as usize] as char);
+        output.push(BASE64_URL_TABLE[((chunk >> 12) & 0x3f) as usize] as char);
+        output.push(BASE64_URL_TABLE[((chunk >> 6) & 0x3f) as usize] as char);
+        output.push(BASE64_URL_TABLE[(chunk & 0x3f) as usize] as char);
+
+        index += 3;
+    }
+
+    match bytes.len() - index {
+        1 => {
+            let chunk = (bytes[index] as u32) << 16;
+            output.push(BASE64_URL_TABLE[((chunk >> 18) & 0x3f) as usize] as char);
+            output.push(BASE64_URL_TABLE[((chunk >> 12) & 0x3f) as usize] as char);
+        }
+        2 => {
+            let chunk = ((bytes[index] as u32) << 16) | ((bytes[index + 1] as u32) << 8);
+            output.push(BASE64_URL_TABLE[((chunk >> 18) & 0x3f) as usize] as char);
+            output.push(BASE64_URL_TABLE[((chunk >> 12) & 0x3f) as usize] as char);
+            output.push(BASE64_URL_TABLE[((chunk >> 6) & 0x3f) as usize] as char);
+        }
+        _ => {}
+    }
+
+    output
 }
 
 #[cfg(test)]
@@ -115,5 +180,33 @@ mod tests {
         let first = hash_refresh_token("secret", "token");
         let second = hash_refresh_token("secret", "token");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn hash_oauth_login_ticket_is_deterministic() {
+        let first = hash_oauth_login_ticket("secret", "ticket");
+        let second = hash_oauth_login_ticket("secret", "ticket");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn oauth_link_user_signature_round_trips() {
+        let user_id = Uuid::now_v7();
+        let signed = sign_oauth_link_user("secret", user_id);
+        assert_eq!(verify_oauth_link_user("secret", &signed), Some(user_id));
+    }
+
+    #[test]
+    fn oauth_link_user_signature_rejects_tampering() {
+        let user_id = Uuid::now_v7();
+        let signed = sign_oauth_link_user("secret", user_id);
+        let tampered = format!("{}x", signed);
+        assert_eq!(verify_oauth_link_user("secret", &tampered), None);
+    }
+
+    #[test]
+    fn pkce_code_challenge_matches_rfc_example() {
+        let challenge = pkce_code_challenge_s256("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+        assert_eq!(challenge, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
     }
 }

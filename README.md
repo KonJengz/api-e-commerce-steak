@@ -7,7 +7,7 @@ REST API backend for an e-commerce platform built with Rust, Axum, and PostgreSQ
 - Email/password authentication with Argon2
 - Email verification and email-change verification
 - Verification resend flow and cleanup of stale unverified accounts
-- Google and GitHub login
+- Google and GitHub login/link flows with hardened browser OAuth flow
 - JWT access tokens and rotating refresh tokens via `HttpOnly` cookies
 - User profile updates with Cloudinary avatar upload
 - Product management with admin-only image upload to Cloudinary

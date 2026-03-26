@@ -139,6 +139,11 @@ pub struct OauthExchangeRequest {
     pub ticket: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct OauthLinkStartRequest {
+    pub redirect_to: Option<String>,
+}
+
 // ─── Response DTOs ──────────────────────────────────────────
 
 /// Auth response — refresh_token is sent as HttpOnly cookie, not in body
@@ -168,6 +173,11 @@ pub struct UserInfo {
 #[derive(Debug, Serialize)]
 pub struct MessageResponse {
     pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OauthStartResponse {
+    pub authorize_url: String,
 }
 
 #[cfg(test)]

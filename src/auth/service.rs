@@ -9,8 +9,8 @@ use crate::shared::jwt;
 use crate::shared::password;
 use crate::shared::security::{
     EMAIL_VERIFICATION_PURPOSE_REGISTER, coerce_oauth_user_name, fallback_user_name,
-    hash_refresh_token, hash_verification_code, normalize_email, normalize_optional_image,
-    normalize_required_name,
+    hash_oauth_login_ticket, hash_refresh_token, hash_verification_code, normalize_email,
+    normalize_optional_image, normalize_required_name,
 };
 
 use super::model::{AuthTokens, UserInfo};
@@ -18,12 +18,15 @@ use super::model::{AuthTokens, UserInfo};
 const EMAIL_VERIFICATION_EXPIRY_MINUTES: i64 = 15;
 const MAX_EMAIL_VERIFICATION_ATTEMPTS: i32 = 5;
 const OAUTH_LOGIN_TICKET_EXPIRY_MINUTES: i64 = 5;
+const GOOGLE_PROVIDER_NAME: &str = "google";
+const GITHUB_PROVIDER_NAME: &str = "github";
+const SOCIAL_ACCOUNT_EXISTS_MESSAGE: &str = "An account with this email already exists. Please sign in with your existing method to continue.";
 
 #[derive(Debug, Deserialize)]
 struct GoogleTokenInfo {
     aud: String,
     email: String,
-    email_verified: bool,
+    email_verified: serde_json::Value,
     name: Option<String>,
     picture: Option<String>,
     sub: String,
@@ -70,6 +73,59 @@ struct VerificationSnapshot<'a> {
     name: Option<&'a str>,
     image: Option<&'a str>,
     password_hash: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct AuthUserRecord {
+    pub(crate) id: Uuid,
+    pub(crate) name: String,
+    pub(crate) email: String,
+    pub(crate) image: Option<String>,
+    pub(crate) role: String,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct SocialUserRecord {
+    id: Uuid,
+    name: String,
+    email: String,
+    image: Option<String>,
+    role: String,
+    is_active: bool,
+    is_verified: bool,
+}
+
+struct SocialIdentity {
+    provider_name: &'static str,
+    provider_label: &'static str,
+    provider_id: String,
+    email: String,
+    name: String,
+    image: Option<String>,
+}
+
+impl From<AuthUserRecord> for UserInfo {
+    fn from(user: AuthUserRecord) -> Self {
+        Self {
+            id: user.id,
+            name: user.name,
+            email: user.email,
+            image: user.image,
+            role: user.role,
+        }
+    }
+}
+
+impl From<SocialUserRecord> for AuthUserRecord {
+    fn from(user: SocialUserRecord) -> Self {
+        Self {
+            id: user.id,
+            name: user.name,
+            email: user.email,
+            image: user.image,
+            role: user.role,
+        }
+    }
 }
 
 /// Create email verification record and return verification code
@@ -512,13 +568,293 @@ pub async fn login(
     })
 }
 
-/// Authenticate user via Google ID Token
-pub async fn google_login(
+async fn load_social_user_by_provider(
+    tx: &mut Transaction<'_, Postgres>,
+    provider_name: &str,
+    provider_id: &str,
+) -> Result<Option<SocialUserRecord>, AppError> {
+    sqlx::query_as::<_, SocialUserRecord>(
+        r#"SELECT u.id, u.name, u.email, u.image, u.role, u.is_active, u.is_verified
+           FROM account_providers ap
+           JOIN users u ON u.id = ap.user_id
+           WHERE ap.provider_name = $1 AND ap.provider_id = $2"#,
+    )
+    .bind(provider_name)
+    .bind(provider_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(Into::into)
+}
+
+async fn load_social_user_by_email(
+    tx: &mut Transaction<'_, Postgres>,
+    email: &str,
+) -> Result<Option<SocialUserRecord>, AppError> {
+    sqlx::query_as::<_, SocialUserRecord>(
+        r#"SELECT id, name, email, image, role, is_active, is_verified
+           FROM users
+           WHERE email = $1
+           FOR UPDATE"#,
+    )
+    .bind(email)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(Into::into)
+}
+
+async fn load_social_user_by_id(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+) -> Result<Option<SocialUserRecord>, AppError> {
+    sqlx::query_as::<_, SocialUserRecord>(
+        r#"SELECT id, name, email, image, role, is_active, is_verified
+           FROM users
+           WHERE id = $1
+           FOR UPDATE"#,
+    )
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(Into::into)
+}
+
+async fn load_existing_provider_link(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    provider_name: &str,
+) -> Result<Option<String>, AppError> {
+    sqlx::query_scalar::<_, String>(
+        r#"SELECT provider_id
+           FROM account_providers
+           WHERE user_id = $1 AND provider_name = $2"#,
+    )
+    .bind(user_id)
+    .bind(provider_name)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(Into::into)
+}
+
+async fn insert_provider_link(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    provider_name: &'static str,
+    provider_label: &'static str,
+    provider_id: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"INSERT INTO account_providers (id, user_id, provider_name, provider_id)
+           VALUES ($1, $2, $3, $4)"#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(user_id)
+    .bind(provider_name)
+    .bind(provider_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| match error {
+        sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some("23505") => {
+            AppError::Conflict(format!(
+                "This {} account is already linked to another user.",
+                provider_label
+            ))
+        }
+        other => other.into(),
+    })?;
+
+    Ok(())
+}
+
+async fn create_social_user(
+    tx: &mut Transaction<'_, Postgres>,
+    identity: &SocialIdentity,
+) -> Result<AuthUserRecord, AppError> {
+    let now = Utc::now();
+    let user = sqlx::query_as::<_, AuthUserRecord>(
+        r#"INSERT INTO users (id, name, email, image, password_hash, role, is_active, is_verified, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, NULL, 'USER', TRUE, TRUE, $5, $5)
+           RETURNING id, name, email, image, role"#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(&identity.name)
+    .bind(&identity.email)
+    .bind(identity.image.as_deref())
+    .bind(now)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    insert_provider_link(
+        tx,
+        user.id,
+        identity.provider_name,
+        identity.provider_label,
+        &identity.provider_id,
+    )
+    .await?;
+
+    Ok(user)
+}
+
+async fn maybe_mark_user_verified_from_social(
+    tx: &mut Transaction<'_, Postgres>,
+    user: &SocialUserRecord,
+    social_email: &str,
+) -> Result<(), AppError> {
+    if user.is_verified || user.email != social_email {
+        return Ok(());
+    }
+
+    sqlx::query("UPDATE users SET is_verified = TRUE, updated_at = $1 WHERE id = $2")
+        .bind(Utc::now())
+        .bind(user.id)
+        .execute(&mut **tx)
+        .await?;
+
+    Ok(())
+}
+
+async fn resolve_social_user(
+    tx: &mut Transaction<'_, Postgres>,
+    identity: &SocialIdentity,
+) -> Result<AuthUserRecord, AppError> {
+    if let Some(user) =
+        load_social_user_by_provider(tx, identity.provider_name, &identity.provider_id).await?
+    {
+        if !user.is_active {
+            return Err(AppError::Forbidden("Account is suspended".to_string()));
+        }
+
+        maybe_mark_user_verified_from_social(tx, &user, &identity.email).await?;
+
+        return Ok(user.into());
+    }
+
+    let existing_user = load_social_user_by_email(tx, &identity.email).await?;
+
+    match existing_user {
+        Some(user) => {
+            if !user.is_active {
+                return Err(AppError::Forbidden("Account is suspended".to_string()));
+            }
+
+            if let Some(existing_provider_id) =
+                load_existing_provider_link(tx, user.id, identity.provider_name).await?
+            {
+                if existing_provider_id != identity.provider_id.as_str() {
+                    return Err(AppError::Conflict(format!(
+                        "This account is already linked to a different {} account.",
+                        identity.provider_label
+                    )));
+                }
+
+                maybe_mark_user_verified_from_social(tx, &user, &identity.email).await?;
+
+                return Ok(user.into());
+            }
+
+            if user.is_verified {
+                return Err(AppError::Conflict(
+                    SOCIAL_ACCOUNT_EXISTS_MESSAGE.to_string(),
+                ));
+            }
+
+            insert_provider_link(
+                tx,
+                user.id,
+                identity.provider_name,
+                identity.provider_label,
+                &identity.provider_id,
+            )
+            .await?;
+
+            maybe_mark_user_verified_from_social(tx, &user, &identity.email).await?;
+
+            Ok(user.into())
+        }
+        None => create_social_user(tx, identity).await,
+    }
+}
+
+async fn link_social_identity(
+    tx: &mut Transaction<'_, Postgres>,
+    current_user_id: Uuid,
+    identity: &SocialIdentity,
+) -> Result<(), AppError> {
+    let current_user = load_social_user_by_id(tx, current_user_id)
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("User no longer exists".to_string()))?;
+
+    if !current_user.is_active {
+        return Err(AppError::Forbidden("Account is suspended".to_string()));
+    }
+
+    if let Some(existing_provider_id) =
+        load_existing_provider_link(tx, current_user.id, identity.provider_name).await?
+    {
+        if existing_provider_id != identity.provider_id.as_str() {
+            return Err(AppError::Conflict(format!(
+                "This account is already linked to a different {} account.",
+                identity.provider_label
+            )));
+        }
+
+        maybe_mark_user_verified_from_social(tx, &current_user, &identity.email).await?;
+        return Ok(());
+    }
+
+    if let Some(linked_user) =
+        load_social_user_by_provider(tx, identity.provider_name, &identity.provider_id).await?
+    {
+        if linked_user.id != current_user.id {
+            return Err(AppError::Conflict(format!(
+                "This {} account is already linked to another user.",
+                identity.provider_label
+            )));
+        }
+
+        maybe_mark_user_verified_from_social(tx, &current_user, &identity.email).await?;
+        return Ok(());
+    }
+
+    insert_provider_link(
+        tx,
+        current_user.id,
+        identity.provider_name,
+        identity.provider_label,
+        &identity.provider_id,
+    )
+    .await?;
+
+    maybe_mark_user_verified_from_social(tx, &current_user, &identity.email).await?;
+
+    Ok(())
+}
+
+async fn issue_tokens_for_user(
     pool: &PgPool,
+    user: AuthUserRecord,
+    config: &AppConfig,
+) -> Result<AuthTokens, AppError> {
+    let access_token = jwt::create_access_token(
+        user.id,
+        &user.role,
+        &config.jwt_secret,
+        config.jwt_access_expiry_minutes,
+    )?;
+    let refresh_token = create_refresh_token(pool, user.id, config).await?;
+
+    Ok(AuthTokens {
+        access_token,
+        refresh_token,
+        user: user.into(),
+    })
+}
+
+async fn fetch_google_identity(
     token: &str,
     expected_nonce: Option<&str>,
     config: &AppConfig,
-) -> Result<AuthTokens, AppError> {
+) -> Result<SocialIdentity, AppError> {
     let client = reqwest::Client::new();
     let res = client
         .get("https://oauth2.googleapis.com/tokeninfo")
@@ -531,10 +867,15 @@ pub async fn google_login(
         return Err(AppError::Unauthorized("Invalid Google token".to_string()));
     }
 
-    let token_info: GoogleTokenInfo = res
-        .json()
+    let body_text = res
+        .text()
         .await
-        .map_err(|_| AppError::Unauthorized("Failed to parse Google token info".to_string()))?;
+        .map_err(|e| AppError::Internal(format!("Failed to read Google token response: {}", e)))?;
+
+    let token_info: GoogleTokenInfo = serde_json::from_str(&body_text).map_err(|e| {
+        tracing::error!(error = %e, body = %body_text, "Failed to parse Google token info");
+        AppError::Unauthorized("Failed to parse Google token info".to_string())
+    })?;
 
     if token_info.aud != config.google_client_id {
         return Err(AppError::Unauthorized(
@@ -542,117 +883,102 @@ pub async fn google_login(
         ));
     }
 
-    if !token_info.email_verified {
+    let is_email_verified = match token_info.email_verified {
+        serde_json::Value::Bool(b) => b,
+        serde_json::Value::String(ref s) => s == "true",
+        _ => false,
+    };
+
+    if !is_email_verified {
         return Err(AppError::Unauthorized(
             "Google email is not verified".to_string(),
         ));
     }
 
-    if let Some(expected) = expected_nonce {
-        if token_info.nonce.as_deref() != Some(expected) {
-            return Err(AppError::Unauthorized("Invalid ID Token nonce".to_string()));
-        }
+    if let Some(expected) = expected_nonce
+        && token_info.nonce.as_deref() != Some(expected)
+    {
+        return Err(AppError::Unauthorized("Invalid ID Token nonce".to_string()));
     }
 
     let email = normalize_email(&token_info.email)?;
     let name = coerce_oauth_user_name(token_info.name.as_deref(), &email);
     let image = normalize_optional_image(token_info.picture.as_deref());
-    let google_id = token_info.sub;
-
-    let mut tx = pool.begin().await?;
-
-    let user = sqlx::query_as::<_, (Uuid, String, Option<String>, String, bool)>(
-        r#"SELECT id, name, image, role, is_active FROM users WHERE email = $1"#,
-    )
-    .bind(&email)
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    let (user_id, user_name, user_image, role, _is_active) = match user {
-        Some((id, existing_name, existing_image, role, is_active)) => {
-            if !is_active {
-                return Err(AppError::Forbidden("Account is suspended".to_string()));
-            }
-            // Auto-verify the email if they log in via Google
-            sqlx::query(
-                "UPDATE users SET is_verified = TRUE WHERE id = $1 AND is_verified = FALSE",
-            )
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-            (id, existing_name, existing_image, role, is_active)
-        }
-        None => {
-            let new_user_id = Uuid::now_v7();
-            let now = Utc::now();
-
-            sqlx::query(
-                r#"INSERT INTO users (id, name, email, image, password_hash, role, is_active, is_verified, created_at, updated_at)
-                   VALUES ($1, $2, $3, $4, NULL, 'USER', TRUE, TRUE, $5, $5)"#,
-            )
-            .bind(new_user_id)
-            .bind(&name)
-            .bind(&email)
-            .bind(image.as_deref())
-            .bind(now)
-            .execute(&mut *tx)
-            .await?;
-
-            (new_user_id, name, image, "USER".to_string(), true)
-        }
-    };
-
-    sqlx::query(
-        r#"INSERT INTO account_providers (id, user_id, provider_name, provider_id)
-           VALUES ($1, $2, 'google', $3)
-           ON CONFLICT (provider_name, provider_id) DO NOTHING"#,
-    )
-    .bind(Uuid::now_v7())
-    .bind(user_id)
-    .bind(&google_id)
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
-
-    let access_token = jwt::create_access_token(
-        user_id,
-        &role,
-        &config.jwt_secret,
-        config.jwt_access_expiry_minutes,
-    )?;
-    let refresh_token = create_refresh_token(pool, user_id, config).await?;
-
-    Ok(AuthTokens {
-        access_token,
-        refresh_token,
-        user: UserInfo {
-            id: user_id,
-            name: user_name,
-            email,
-            image: user_image,
-            role,
-        },
+    Ok(SocialIdentity {
+        provider_name: GOOGLE_PROVIDER_NAME,
+        provider_label: "Google",
+        provider_id: token_info.sub,
+        email,
+        name,
+        image,
     })
 }
 
-pub async fn google_login_with_authorization_code(
+async fn authenticate_social_identity(
+    pool: &PgPool,
+    identity: &SocialIdentity,
+) -> Result<AuthUserRecord, AppError> {
+    let mut tx = pool.begin().await?;
+    let user = resolve_social_user(&mut tx, identity).await?;
+    tx.commit().await?;
+    Ok(user)
+}
+
+async fn google_authenticate(
+    pool: &PgPool,
+    token: &str,
+    expected_nonce: Option<&str>,
+    config: &AppConfig,
+) -> Result<AuthUserRecord, AppError> {
+    let identity = fetch_google_identity(token, expected_nonce, config).await?;
+    authenticate_social_identity(pool, &identity).await
+}
+
+async fn google_identity_with_authorization_code(
+    code: &str,
+    redirect_uri: &str,
+    nonce: Option<&str>,
+    code_verifier: &str,
+    config: &AppConfig,
+) -> Result<SocialIdentity, AppError> {
+    let id_token =
+        exchange_google_authorization_code(code, redirect_uri, code_verifier, config).await?;
+    fetch_google_identity(&id_token, nonce, config).await
+}
+
+pub(crate) async fn google_authenticate_with_authorization_code(
     pool: &PgPool,
     code: &str,
     redirect_uri: &str,
     nonce: Option<&str>,
+    code_verifier: &str,
     config: &AppConfig,
-) -> Result<AuthTokens, AppError> {
-    let id_token = exchange_google_authorization_code(code, redirect_uri, config).await?;
-    google_login(pool, &id_token, nonce, config).await
+) -> Result<AuthUserRecord, AppError> {
+    let identity =
+        google_identity_with_authorization_code(code, redirect_uri, nonce, code_verifier, config)
+            .await?;
+    authenticate_social_identity(pool, &identity).await
 }
 
-/// Authenticate user via GitHub Authorization Code
-pub async fn github_login(
+pub(crate) async fn link_google_account_with_authorization_code(
     pool: &PgPool,
+    current_user_id: Uuid,
     code: &str,
+    redirect_uri: &str,
+    nonce: Option<&str>,
+    code_verifier: &str,
     config: &AppConfig,
-) -> Result<AuthTokens, AppError> {
+) -> Result<(), AppError> {
+    let identity =
+        google_identity_with_authorization_code(code, redirect_uri, nonce, code_verifier, config)
+            .await?;
+    let mut tx = pool.begin().await?;
+    link_social_identity(&mut tx, current_user_id, &identity).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn fetch_github_identity(code: &str, config: &AppConfig) -> Result<SocialIdentity, AppError> {
     let client = reqwest::Client::new();
 
     let params = [
@@ -703,8 +1029,6 @@ pub async fn github_login(
         .await
         .map_err(|_| AppError::Internal("Failed to parse GitHub profile".to_string()))?;
 
-    let github_id_str = github_user.id.to_string();
-
     let emails_res = client
         .get("https://api.github.com/user/emails")
         .header("Authorization", format!("Bearer {}", github_access_token))
@@ -735,128 +1059,104 @@ pub async fn github_login(
     let name = coerce_oauth_user_name(github_user.name.as_deref(), &primary_email);
     let image = normalize_optional_image(github_user.avatar_url.as_deref());
 
-    let mut tx = pool.begin().await?;
-
-    let user = sqlx::query_as::<_, (Uuid, String, Option<String>, String, bool)>(
-        r#"SELECT id, name, image, role, is_active FROM users WHERE email = $1"#,
-    )
-    .bind(&primary_email)
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    let (user_id, user_name, user_image, role, _is_active) = match user {
-        Some((id, existing_name, existing_image, role, is_active)) => {
-            if !is_active {
-                return Err(AppError::Forbidden("Account is suspended".to_string()));
-            }
-            // Auto-verify the email if they log in via GitHub
-            sqlx::query(
-                "UPDATE users SET is_verified = TRUE WHERE id = $1 AND is_verified = FALSE",
-            )
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-            (id, existing_name, existing_image, role, is_active)
-        }
-        None => {
-            let new_user_id = Uuid::now_v7();
-            let now = Utc::now();
-
-            sqlx::query(
-                r#"INSERT INTO users (id, name, email, image, password_hash, role, is_active, is_verified, created_at, updated_at)
-                   VALUES ($1, $2, $3, $4, NULL, 'USER', TRUE, TRUE, $5, $5)"#,
-            )
-            .bind(new_user_id)
-            .bind(&name)
-            .bind(&primary_email)
-            .bind(image.as_deref())
-            .bind(now)
-            .execute(&mut *tx)
-            .await?;
-
-            (new_user_id, name, image, "USER".to_string(), true)
-        }
-    };
-
-    sqlx::query(
-        r#"INSERT INTO account_providers (id, user_id, provider_name, provider_id)
-           VALUES ($1, $2, 'github', $3)
-           ON CONFLICT (provider_name, provider_id) DO NOTHING"#,
-    )
-    .bind(Uuid::now_v7())
-    .bind(user_id)
-    .bind(&github_id_str)
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
-
-    let access_token = jwt::create_access_token(
-        user_id,
-        &role,
-        &config.jwt_secret,
-        config.jwt_access_expiry_minutes,
-    )?;
-    let refresh_token = create_refresh_token(pool, user_id, config).await?;
-
-    Ok(AuthTokens {
-        access_token,
-        refresh_token,
-        user: UserInfo {
-            id: user_id,
-            name: user_name,
-            email: primary_email,
-            image: user_image,
-            role,
-        },
+    Ok(SocialIdentity {
+        provider_name: GITHUB_PROVIDER_NAME,
+        provider_label: "GitHub",
+        provider_id: github_user.id.to_string(),
+        email: primary_email,
+        name,
+        image,
     })
+}
+
+/// Authenticate user via Google ID Token
+pub async fn google_login(
+    pool: &PgPool,
+    token: &str,
+    expected_nonce: Option<&str>,
+    config: &AppConfig,
+) -> Result<AuthTokens, AppError> {
+    let user = google_authenticate(pool, token, expected_nonce, config).await?;
+    issue_tokens_for_user(pool, user, config).await
+}
+
+pub(crate) async fn github_authenticate(
+    pool: &PgPool,
+    code: &str,
+    config: &AppConfig,
+) -> Result<AuthUserRecord, AppError> {
+    let identity = fetch_github_identity(code, config).await?;
+    authenticate_social_identity(pool, &identity).await
+}
+
+pub(crate) async fn link_github_account(
+    pool: &PgPool,
+    current_user_id: Uuid,
+    code: &str,
+    config: &AppConfig,
+) -> Result<(), AppError> {
+    let identity = fetch_github_identity(code, config).await?;
+    let mut tx = pool.begin().await?;
+    link_social_identity(&mut tx, current_user_id, &identity).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Authenticate user via GitHub Authorization Code
+pub async fn github_login(
+    pool: &PgPool,
+    code: &str,
+    config: &AppConfig,
+) -> Result<AuthTokens, AppError> {
+    let user = github_authenticate(pool, code, config).await?;
+    issue_tokens_for_user(pool, user, config).await
 }
 
 pub async fn create_oauth_login_ticket(
     pool: &PgPool,
-    tokens: &AuthTokens,
+    user_id: Uuid,
+    config: &AppConfig,
 ) -> Result<String, AppError> {
-    let ticket = Uuid::now_v7();
+    let ticket = jwt::create_refresh_token();
+    let ticket_hash = hash_oauth_login_ticket(&config.jwt_secret, &ticket);
     let expires_at = Utc::now() + Duration::minutes(OAUTH_LOGIN_TICKET_EXPIRY_MINUTES);
 
     sqlx::query(
         r#"INSERT INTO oauth_login_tickets
-           (id, access_token, refresh_token, user_id, expires_at)
-           VALUES ($1, $2, $3, $4, $5)"#,
+           (id, ticket_hash, user_id, expires_at)
+           VALUES ($1, $2, $3, $4)"#,
     )
-    .bind(ticket)
-    .bind(&tokens.access_token)
-    .bind(&tokens.refresh_token)
-    .bind(tokens.user.id)
+    .bind(Uuid::now_v7())
+    .bind(ticket_hash)
+    .bind(user_id)
     .bind(expires_at)
     .execute(pool)
     .await?;
 
-    Ok(ticket.to_string())
+    Ok(ticket)
 }
 
 pub async fn exchange_oauth_login_ticket(
     pool: &PgPool,
     ticket: &str,
+    config: &AppConfig,
 ) -> Result<AuthTokens, AppError> {
-    let ticket_id = Uuid::parse_str(ticket)
-        .map_err(|_| AppError::BadRequest("Invalid OAuth login ticket".to_string()))?;
-
+    let ticket_hash = hash_oauth_login_ticket(&config.jwt_secret, ticket);
     let mut tx = pool.begin().await?;
 
-    let record = sqlx::query_as::<_, (String, String, Uuid, chrono::DateTime<Utc>)>(
+    let record = sqlx::query_as::<_, (Uuid, chrono::DateTime<Utc>)>(
         r#"DELETE FROM oauth_login_tickets
-           WHERE id = $1
-           RETURNING access_token, refresh_token, user_id, expires_at"#,
+           WHERE ticket_hash = $1
+           RETURNING user_id, expires_at"#,
     )
-    .bind(ticket_id)
+    .bind(&ticket_hash)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| {
         AppError::Unauthorized("OAuth login ticket is invalid or expired".to_string())
     })?;
 
-    let (access_token, refresh_token, user_id, expires_at) = record;
+    let (user_id, expires_at) = record;
 
     if Utc::now() > expires_at {
         tx.commit().await?;
@@ -865,7 +1165,7 @@ pub async fn exchange_oauth_login_ticket(
         ));
     }
 
-    let user = sqlx::query_as::<_, (Uuid, String, String, Option<String>, String)>(
+    let user = sqlx::query_as::<_, AuthUserRecord>(
         r#"SELECT id, name, email, image, role
            FROM users
            WHERE id = $1 AND is_active = TRUE"#,
@@ -877,19 +1177,7 @@ pub async fn exchange_oauth_login_ticket(
 
     tx.commit().await?;
 
-    let (id, name, email, image, role) = user;
-
-    Ok(AuthTokens {
-        access_token,
-        refresh_token,
-        user: UserInfo {
-            id,
-            name,
-            email,
-            image,
-            role,
-        },
-    })
+    issue_tokens_for_user(pool, user, config).await
 }
 
 /// Rotate refresh token: validate old one, delete it, create new one
@@ -1143,6 +1431,7 @@ fn build_refresh_token_record(config: &AppConfig) -> (Uuid, String, String, chro
 async fn exchange_google_authorization_code(
     code: &str,
     redirect_uri: &str,
+    code_verifier: &str,
     config: &AppConfig,
 ) -> Result<String, AppError> {
     let client = reqwest::Client::new();
@@ -1154,6 +1443,7 @@ async fn exchange_google_authorization_code(
             ("client_id", config.google_client_id.as_str()),
             ("client_secret", config.google_client_secret.as_str()),
             ("redirect_uri", redirect_uri),
+            ("code_verifier", code_verifier),
             ("grant_type", "authorization_code"),
         ])
         .send()

@@ -14,6 +14,7 @@ use axum_extra::extract::{
 };
 use reqwest::Url;
 use serde::Deserialize;
+use uuid::Uuid;
 use validator::Validate;
 
 use crate::AppState;
@@ -24,6 +25,9 @@ use crate::shared::extractors::AuthUser;
 use crate::shared::http::client_ip;
 use crate::shared::jwt;
 use crate::shared::rate_limit::RateLimitRule;
+use crate::shared::security::{
+    pkce_code_challenge_s256, sign_oauth_link_user, verify_oauth_link_user,
+};
 
 use super::model::*;
 use super::service;
@@ -34,6 +38,8 @@ const OAUTH_STATE_COOKIE: &str = "oauth_state";
 const OAUTH_EXCHANGE_URL_COOKIE: &str = "oauth_exchange_url";
 const OAUTH_REDIRECT_TO_COOKIE: &str = "oauth_redirect_to";
 const OAUTH_NONCE_COOKIE: &str = "oauth_nonce";
+const OAUTH_PKCE_VERIFIER_COOKIE: &str = "oauth_pkce_verifier";
+const OAUTH_LINK_USER_COOKIE: &str = "oauth_link_user";
 const OAUTH_COOKIE_PATH: &str = "/api/auth";
 
 #[derive(Debug, Deserialize)]
@@ -54,6 +60,15 @@ struct OauthFlow {
     exchange_url: String,
     redirect_to: String,
     nonce: Option<String>,
+    code_verifier: Option<String>,
+}
+
+#[derive(Debug)]
+struct OauthLinkFlow {
+    redirect_to: String,
+    nonce: Option<String>,
+    code_verifier: Option<String>,
+    user_id: Uuid,
 }
 
 pub fn router() -> Router<AppState> {
@@ -64,9 +79,13 @@ pub fn router() -> Router<AppState> {
         .route("/login", post(login))
         .route("/google/start", get(google_start))
         .route("/google/callback", get(google_callback))
+        .route("/google/link/start", post(google_link_start))
+        .route("/google/link/callback", get(google_link_callback))
         .route("/google/login", post(google_login))
         .route("/github/start", get(github_start))
         .route("/github/callback", get(github_callback))
+        .route("/github/link/start", post(github_link_start))
+        .route("/github/link/callback", get(github_link_callback))
         .route("/github/login", post(github_login))
         .route("/oauth/exchange", post(oauth_exchange))
         .route("/refresh", post(refresh_token))
@@ -110,9 +129,23 @@ fn oauth_cookie_tombstone(name: &'static str, cookie_secure: bool) -> Cookie<'st
 
 fn clear_oauth_flow_cookies(jar: CookieJar, cookie_secure: bool) -> CookieJar {
     jar.remove(oauth_cookie_tombstone(OAUTH_STATE_COOKIE, cookie_secure))
-        .remove(oauth_cookie_tombstone(OAUTH_EXCHANGE_URL_COOKIE, cookie_secure))
-        .remove(oauth_cookie_tombstone(OAUTH_REDIRECT_TO_COOKIE, cookie_secure))
+        .remove(oauth_cookie_tombstone(
+            OAUTH_EXCHANGE_URL_COOKIE,
+            cookie_secure,
+        ))
+        .remove(oauth_cookie_tombstone(
+            OAUTH_REDIRECT_TO_COOKIE,
+            cookie_secure,
+        ))
         .remove(oauth_cookie_tombstone(OAUTH_NONCE_COOKIE, cookie_secure))
+        .remove(oauth_cookie_tombstone(
+            OAUTH_PKCE_VERIFIER_COOKIE,
+            cookie_secure,
+        ))
+        .remove(oauth_cookie_tombstone(
+            OAUTH_LINK_USER_COOKIE,
+            cookie_secure,
+        ))
 }
 
 fn normalize_redirect_to(redirect_to: Option<&str>) -> String {
@@ -143,8 +176,23 @@ fn frontend_login_redirect(config: &AppConfig, error_code: &str) -> Redirect {
     Redirect::to(url.as_ref())
 }
 
+fn frontend_link_redirect(
+    config: &AppConfig,
+    redirect_to: &str,
+    provider: &str,
+    query_key: &str,
+    query_value: &str,
+) -> Redirect {
+    let mut url = Url::parse(&config.app_url).expect("APP_URL must be a valid URL");
+    url.set_path(redirect_to);
+    url.query_pairs_mut()
+        .append_pair("link_provider", provider)
+        .append_pair(query_key, query_value);
+    Redirect::to(url.as_ref())
+}
+
 fn validate_exchange_url(exchange_url: &str, config: &AppConfig) -> Result<String, AppError> {
-    let parsed = Url::parse(exchange_url)
+    let mut parsed = Url::parse(exchange_url)
         .map_err(|_| AppError::BadRequest("Invalid exchange callback URL".to_string()))?;
     let frontend = Url::parse(&config.app_url)
         .map_err(|_| AppError::Internal("APP_URL must be a valid URL".to_string()))?;
@@ -160,6 +208,9 @@ fn validate_exchange_url(exchange_url: &str, config: &AppConfig) -> Result<Strin
             "Exchange callback path must be /login/oauth/callback".to_string(),
         ));
     }
+
+    parsed.set_query(None);
+    parsed.set_fragment(None);
 
     Ok(parsed.to_string())
 }
@@ -207,6 +258,9 @@ fn oauth_flow_from_jar(jar: &CookieJar, state: Option<&str>) -> Result<OauthFlow
     let nonce = jar
         .get(OAUTH_NONCE_COOKIE)
         .map(|cookie| cookie.value().to_string());
+    let code_verifier = jar
+        .get(OAUTH_PKCE_VERIFIER_COOKIE)
+        .map(|cookie| cookie.value().to_string());
 
     if expected_state.as_deref().is_none() || state.is_none() || expected_state.as_deref() != state
     {
@@ -219,7 +273,68 @@ fn oauth_flow_from_jar(jar: &CookieJar, state: Option<&str>) -> Result<OauthFlow
         exchange_url,
         redirect_to,
         nonce,
+        code_verifier,
     })
+}
+
+fn oauth_link_flow_from_jar(
+    jar: &CookieJar,
+    state: Option<&str>,
+    config: &AppConfig,
+) -> Result<OauthLinkFlow, &'static str> {
+    let expected_state = jar
+        .get(OAUTH_STATE_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let redirect_to = normalize_redirect_to(
+        jar.get(OAUTH_REDIRECT_TO_COOKIE)
+            .map(|cookie| cookie.value()),
+    );
+    let nonce = jar
+        .get(OAUTH_NONCE_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let code_verifier = jar
+        .get(OAUTH_PKCE_VERIFIER_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let user_id = jar
+        .get(OAUTH_LINK_USER_COOKIE)
+        .and_then(|cookie| verify_oauth_link_user(&config.jwt_secret, cookie.value()))
+        .ok_or("invalid_oauth_link_session")?;
+
+    if expected_state.as_deref().is_none() || state.is_none() || expected_state.as_deref() != state
+    {
+        return Err("invalid_oauth_state");
+    }
+
+    Ok(OauthLinkFlow {
+        redirect_to,
+        nonce,
+        code_verifier,
+        user_id,
+    })
+}
+
+fn oauth_callback_error_code(fallback: &'static str, error: &AppError) -> &'static str {
+    match error {
+        AppError::Conflict(_) => "oauth_account_conflict",
+        AppError::Forbidden(message) if message == "Account is suspended" => "account_suspended",
+        _ => fallback,
+    }
+}
+
+fn oauth_link_callback_error_code(fallback: &'static str, error: &AppError) -> &'static str {
+    match error {
+        AppError::Conflict(message) if message.contains("already linked to another user") => {
+            "oauth_account_already_linked"
+        }
+        AppError::Conflict(message) if message.contains("already linked to a different") => {
+            "oauth_provider_conflict"
+        }
+        AppError::Forbidden(message) if message == "Account is suspended" => "account_suspended",
+        AppError::Unauthorized(message) if message == "User no longer exists" => {
+            "link_session_expired"
+        }
+        _ => fallback,
+    }
 }
 
 fn oauth_success_redirect(
@@ -435,6 +550,8 @@ async fn google_start(
     let callback_url = provider_callback_url(&origin, "/api/auth/google/callback");
     let state_token = jwt::create_refresh_token();
     let nonce = jwt::create_refresh_token();
+    let code_verifier = jwt::create_refresh_token();
+    let code_challenge = pkce_code_challenge_s256(&code_verifier);
 
     let mut authorize_url = Url::parse("https://accounts.google.com/o/oauth2/v2/auth")
         .map_err(|_| AppError::Internal("Failed to build Google authorize URL".to_string()))?;
@@ -446,7 +563,9 @@ async fn google_start(
         .append_pair("scope", "openid email profile")
         .append_pair("prompt", "select_account")
         .append_pair("state", &state_token)
-        .append_pair("nonce", &nonce);
+        .append_pair("nonce", &nonce)
+        .append_pair("code_challenge", &code_challenge)
+        .append_pair("code_challenge_method", "S256");
 
     let jar = CookieJar::new()
         .add(oauth_cookie(
@@ -468,9 +587,94 @@ async fn google_start(
             OAUTH_NONCE_COOKIE,
             nonce,
             state.config.cookie_secure,
+        ))
+        .add(oauth_cookie(
+            OAUTH_PKCE_VERIFIER_COOKIE,
+            code_verifier,
+            state.config.cookie_secure,
         ));
 
     Ok((jar, Redirect::to(authorize_url.as_ref())))
+}
+
+async fn google_link_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    auth: AuthUser,
+    Json(body): Json<OauthLinkStartRequest>,
+) -> Result<(CookieJar, Json<OauthStartResponse>), AppError> {
+    let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
+    apply_ip_limit(&state, "google_oauth_link_start", &client_ip, 20).await?;
+    apply_rate_limit(
+        &state,
+        format!("auth:google_oauth_link_start:user:{}", auth.user_id),
+        "google_oauth_link_start",
+        20,
+    )
+    .await?;
+
+    if !is_google_oauth_configured(&state.config) {
+        return Err(AppError::BadRequest(
+            "Google login is not configured".to_string(),
+        ));
+    }
+
+    let redirect_to = normalize_redirect_to(body.redirect_to.as_deref());
+    let origin = backend_origin(&headers, state.config.trust_proxy_headers)?;
+    let callback_url = provider_callback_url(&origin, "/api/auth/google/link/callback");
+    let state_token = jwt::create_refresh_token();
+    let nonce = jwt::create_refresh_token();
+    let code_verifier = jwt::create_refresh_token();
+    let code_challenge = pkce_code_challenge_s256(&code_verifier);
+
+    let mut authorize_url = Url::parse("https://accounts.google.com/o/oauth2/v2/auth")
+        .map_err(|_| AppError::Internal("Failed to build Google authorize URL".to_string()))?;
+    authorize_url
+        .query_pairs_mut()
+        .append_pair("client_id", &state.config.google_client_id)
+        .append_pair("redirect_uri", &callback_url)
+        .append_pair("response_type", "code")
+        .append_pair("scope", "openid email profile")
+        .append_pair("prompt", "select_account")
+        .append_pair("state", &state_token)
+        .append_pair("nonce", &nonce)
+        .append_pair("code_challenge", &code_challenge)
+        .append_pair("code_challenge_method", "S256");
+
+    let jar = clear_oauth_flow_cookies(CookieJar::new(), state.config.cookie_secure)
+        .add(oauth_cookie(
+            OAUTH_STATE_COOKIE,
+            state_token,
+            state.config.cookie_secure,
+        ))
+        .add(oauth_cookie(
+            OAUTH_REDIRECT_TO_COOKIE,
+            redirect_to,
+            state.config.cookie_secure,
+        ))
+        .add(oauth_cookie(
+            OAUTH_NONCE_COOKIE,
+            nonce,
+            state.config.cookie_secure,
+        ))
+        .add(oauth_cookie(
+            OAUTH_PKCE_VERIFIER_COOKIE,
+            code_verifier,
+            state.config.cookie_secure,
+        ))
+        .add(oauth_cookie(
+            OAUTH_LINK_USER_COOKIE,
+            sign_oauth_link_user(&state.config.jwt_secret, auth.user_id),
+            state.config.cookie_secure,
+        ));
+
+    Ok((
+        jar,
+        Json(OauthStartResponse {
+            authorize_url: authorize_url.to_string(),
+        }),
+    ))
 }
 
 async fn google_callback(
@@ -515,26 +719,41 @@ async fn google_callback(
 
     let origin = backend_origin(&headers, state.config.trust_proxy_headers)?;
     let callback_url = provider_callback_url(&origin, "/api/auth/google/callback");
-
-    let tokens = match service::google_login_with_authorization_code(
-        &state.pool,
-        code,
-        &callback_url,
-        flow.nonce.as_deref(),
-        &state.config,
-    )
-    .await
-    {
-        Ok(tokens) => tokens,
-        Err(_) => {
+    let code_verifier = match flow.code_verifier.as_deref() {
+        Some(value) => value,
+        None => {
             return Ok((
                 cleared_jar,
-                frontend_login_redirect(&state.config, "google_sign_in_failed"),
+                frontend_login_redirect(&state.config, "missing_oauth_pkce_verifier"),
             ));
         }
     };
 
-    let ticket = match service::create_oauth_login_ticket(&state.pool, &tokens).await {
+    let user = match service::google_authenticate_with_authorization_code(
+        &state.pool,
+        code,
+        &callback_url,
+        flow.nonce.as_deref(),
+        code_verifier,
+        &state.config,
+    )
+    .await
+    {
+        Ok(user) => user,
+        Err(error) => {
+            tracing::warn!(error = %error, "google oauth callback failed");
+            return Ok((
+                cleared_jar,
+                frontend_login_redirect(
+                    &state.config,
+                    oauth_callback_error_code("google_sign_in_failed", &error),
+                ),
+            ));
+        }
+    };
+
+    let ticket = match service::create_oauth_login_ticket(&state.pool, user.id, &state.config).await
+    {
         Ok(ticket) => ticket,
         Err(_) => {
             return Ok((
@@ -546,6 +765,122 @@ async fn google_callback(
 
     let redirect = oauth_success_redirect(&flow.exchange_url, &ticket, &flow.redirect_to)?;
     Ok((cleared_jar, redirect))
+}
+
+async fn google_link_callback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    jar: CookieJar,
+    Query(query): Query<OauthCallbackQuery>,
+) -> Result<(CookieJar, Redirect), AppError> {
+    let redirect_to = normalize_redirect_to(
+        jar.get(OAUTH_REDIRECT_TO_COOKIE)
+            .map(|cookie| cookie.value()),
+    );
+    let flow = oauth_link_flow_from_jar(&jar, query.state.as_deref(), &state.config);
+    let cleared_jar = clear_oauth_flow_cookies(jar, state.config.cookie_secure);
+
+    let flow = match flow {
+        Ok(flow) => flow,
+        Err(error_code) => {
+            return Ok((
+                cleared_jar,
+                frontend_link_redirect(
+                    &state.config,
+                    &redirect_to,
+                    "google",
+                    "link_error",
+                    error_code,
+                ),
+            ));
+        }
+    };
+
+    if query.error.is_some() {
+        return Ok((
+            cleared_jar,
+            frontend_link_redirect(
+                &state.config,
+                &flow.redirect_to,
+                "google",
+                "link_error",
+                "google_link_access_denied",
+            ),
+        ));
+    }
+
+    let code = match query.code.as_deref() {
+        Some(code) => code,
+        None => {
+            return Ok((
+                cleared_jar,
+                frontend_link_redirect(
+                    &state.config,
+                    &flow.redirect_to,
+                    "google",
+                    "link_error",
+                    "missing_oauth_code",
+                ),
+            ));
+        }
+    };
+
+    let code_verifier = match flow.code_verifier.as_deref() {
+        Some(value) => value,
+        None => {
+            return Ok((
+                cleared_jar,
+                frontend_link_redirect(
+                    &state.config,
+                    &flow.redirect_to,
+                    "google",
+                    "link_error",
+                    "missing_oauth_pkce_verifier",
+                ),
+            ));
+        }
+    };
+
+    let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
+    apply_ip_limit(&state, "google_oauth_link_callback", &client_ip, 20).await?;
+
+    let origin = backend_origin(&headers, state.config.trust_proxy_headers)?;
+    let callback_url = provider_callback_url(&origin, "/api/auth/google/link/callback");
+    if let Err(error) = service::link_google_account_with_authorization_code(
+        &state.pool,
+        flow.user_id,
+        code,
+        &callback_url,
+        flow.nonce.as_deref(),
+        code_verifier,
+        &state.config,
+    )
+    .await
+    {
+        tracing::warn!(error = %error, "google oauth link callback failed");
+        return Ok((
+            cleared_jar,
+            frontend_link_redirect(
+                &state.config,
+                &flow.redirect_to,
+                "google",
+                "link_error",
+                oauth_link_callback_error_code("google_link_failed", &error),
+            ),
+        ));
+    }
+
+    Ok((
+        cleared_jar,
+        frontend_link_redirect(
+            &state.config,
+            &flow.redirect_to,
+            "google",
+            "link_status",
+            "success",
+        ),
+    ))
 }
 
 async fn google_login(
@@ -628,6 +963,68 @@ async fn github_start(
     Ok((jar, Redirect::to(authorize_url.as_ref())))
 }
 
+async fn github_link_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    auth: AuthUser,
+    Json(body): Json<OauthLinkStartRequest>,
+) -> Result<(CookieJar, Json<OauthStartResponse>), AppError> {
+    let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
+    apply_ip_limit(&state, "github_oauth_link_start", &client_ip, 20).await?;
+    apply_rate_limit(
+        &state,
+        format!("auth:github_oauth_link_start:user:{}", auth.user_id),
+        "github_oauth_link_start",
+        20,
+    )
+    .await?;
+
+    if !is_github_oauth_configured(&state.config) {
+        return Err(AppError::BadRequest(
+            "GitHub login is not configured".to_string(),
+        ));
+    }
+
+    let redirect_to = normalize_redirect_to(body.redirect_to.as_deref());
+    let origin = backend_origin(&headers, state.config.trust_proxy_headers)?;
+    let callback_url = provider_callback_url(&origin, "/api/auth/github/link/callback");
+    let state_token = jwt::create_refresh_token();
+
+    let mut authorize_url = Url::parse("https://github.com/login/oauth/authorize")
+        .map_err(|_| AppError::Internal("Failed to build GitHub authorize URL".to_string()))?;
+    authorize_url
+        .query_pairs_mut()
+        .append_pair("client_id", &state.config.github_client_id)
+        .append_pair("redirect_uri", &callback_url)
+        .append_pair("scope", "read:user user:email")
+        .append_pair("state", &state_token);
+
+    let jar = clear_oauth_flow_cookies(CookieJar::new(), state.config.cookie_secure)
+        .add(oauth_cookie(
+            OAUTH_STATE_COOKIE,
+            state_token,
+            state.config.cookie_secure,
+        ))
+        .add(oauth_cookie(
+            OAUTH_REDIRECT_TO_COOKIE,
+            redirect_to,
+            state.config.cookie_secure,
+        ))
+        .add(oauth_cookie(
+            OAUTH_LINK_USER_COOKIE,
+            sign_oauth_link_user(&state.config.jwt_secret, auth.user_id),
+            state.config.cookie_secure,
+        ));
+
+    Ok((
+        jar,
+        Json(OauthStartResponse {
+            authorize_url: authorize_url.to_string(),
+        }),
+    ))
+}
+
 async fn github_callback(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -668,17 +1065,22 @@ async fn github_callback(
     let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
     apply_ip_limit(&state, "github_oauth_callback", &client_ip, 20).await?;
 
-    let tokens = match service::github_login(&state.pool, code, &state.config).await {
-        Ok(tokens) => tokens,
-        Err(_) => {
+    let user = match service::github_authenticate(&state.pool, code, &state.config).await {
+        Ok(user) => user,
+        Err(error) => {
+            tracing::warn!(error = %error, "github oauth callback failed");
             return Ok((
                 cleared_jar,
-                frontend_login_redirect(&state.config, "github_sign_in_failed"),
+                frontend_login_redirect(
+                    &state.config,
+                    oauth_callback_error_code("github_sign_in_failed", &error),
+                ),
             ));
         }
     };
 
-    let ticket = match service::create_oauth_login_ticket(&state.pool, &tokens).await {
+    let ticket = match service::create_oauth_login_ticket(&state.pool, user.id, &state.config).await
+    {
         Ok(ticket) => ticket,
         Err(_) => {
             return Ok((
@@ -690,6 +1092,96 @@ async fn github_callback(
 
     let redirect = oauth_success_redirect(&flow.exchange_url, &ticket, &flow.redirect_to)?;
     Ok((cleared_jar, redirect))
+}
+
+async fn github_link_callback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    jar: CookieJar,
+    Query(query): Query<OauthCallbackQuery>,
+) -> Result<(CookieJar, Redirect), AppError> {
+    let redirect_to = normalize_redirect_to(
+        jar.get(OAUTH_REDIRECT_TO_COOKIE)
+            .map(|cookie| cookie.value()),
+    );
+    let flow = oauth_link_flow_from_jar(&jar, query.state.as_deref(), &state.config);
+    let cleared_jar = clear_oauth_flow_cookies(jar, state.config.cookie_secure);
+
+    let flow = match flow {
+        Ok(flow) => flow,
+        Err(error_code) => {
+            return Ok((
+                cleared_jar,
+                frontend_link_redirect(
+                    &state.config,
+                    &redirect_to,
+                    "github",
+                    "link_error",
+                    error_code,
+                ),
+            ));
+        }
+    };
+
+    if query.error.is_some() {
+        return Ok((
+            cleared_jar,
+            frontend_link_redirect(
+                &state.config,
+                &flow.redirect_to,
+                "github",
+                "link_error",
+                "github_link_access_denied",
+            ),
+        ));
+    }
+
+    let code = match query.code.as_deref() {
+        Some(code) => code,
+        None => {
+            return Ok((
+                cleared_jar,
+                frontend_link_redirect(
+                    &state.config,
+                    &flow.redirect_to,
+                    "github",
+                    "link_error",
+                    "missing_oauth_code",
+                ),
+            ));
+        }
+    };
+
+    let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
+    apply_ip_limit(&state, "github_oauth_link_callback", &client_ip, 20).await?;
+
+    if let Err(error) =
+        service::link_github_account(&state.pool, flow.user_id, code, &state.config).await
+    {
+        tracing::warn!(error = %error, "github oauth link callback failed");
+        return Ok((
+            cleared_jar,
+            frontend_link_redirect(
+                &state.config,
+                &flow.redirect_to,
+                "github",
+                "link_error",
+                oauth_link_callback_error_code("github_link_failed", &error),
+            ),
+        ));
+    }
+
+    Ok((
+        cleared_jar,
+        frontend_link_redirect(
+            &state.config,
+            &flow.redirect_to,
+            "github",
+            "link_status",
+            "success",
+        ),
+    ))
 }
 
 async fn github_login(
@@ -733,7 +1225,8 @@ async fn oauth_exchange(
     let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
     apply_ip_limit(&state, "oauth_exchange", &client_ip, 20).await?;
 
-    let tokens = service::exchange_oauth_login_ticket(&state.pool, &body.ticket).await?;
+    let tokens =
+        service::exchange_oauth_login_ticket(&state.pool, &body.ticket, &state.config).await?;
     let cookie = build_refresh_cookie(
         &tokens.refresh_token,
         state.config.jwt_refresh_expiry_days,

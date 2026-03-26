@@ -8,11 +8,12 @@ use crate::shared::errors::AppError;
 use crate::shared::jwt;
 use crate::shared::password;
 use crate::shared::security::{
-    EMAIL_VERIFICATION_PURPOSE_REGISTER, hash_refresh_token, hash_verification_code,
-    normalize_email,
+    EMAIL_VERIFICATION_PURPOSE_REGISTER, coerce_oauth_user_name, fallback_user_name,
+    hash_refresh_token, hash_verification_code, normalize_email, normalize_optional_image,
+    normalize_required_name,
 };
 
-use super::model::{AuthTokens, MessageResponse, UserInfo};
+use super::model::{AuthTokens, UserInfo};
 
 const EMAIL_VERIFICATION_EXPIRY_MINUTES: i64 = 15;
 const MAX_EMAIL_VERIFICATION_ATTEMPTS: i32 = 5;
@@ -22,6 +23,8 @@ const OAUTH_LOGIN_TICKET_EXPIRY_MINUTES: i64 = 5;
 struct GoogleTokenInfo {
     aud: String,
     email: String,
+    name: Option<String>,
+    picture: Option<String>,
     sub: String,
 }
 
@@ -38,6 +41,8 @@ struct GoogleAuthorizationCodeResponse {
 #[derive(Debug, Deserialize)]
 struct GithubUser {
     id: i64,
+    name: Option<String>,
+    avatar_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +56,8 @@ struct GithubEmail {
 struct EmailVerificationRecord {
     id: Uuid,
     email: String,
+    name: Option<String>,
+    image: Option<String>,
     code_hash: String,
     password_hash: Option<String>,
     expires_at: chrono::DateTime<Utc>,
@@ -60,20 +67,73 @@ struct EmailVerificationRecord {
 /// Create email verification record and return verification code
 pub async fn create_email_verification(
     pool: &PgPool,
+    name: &str,
     email: &str,
     plain_password: &str,
+    image: Option<&str>,
     config: &AppConfig,
 ) -> Result<String, AppError> {
+    let name = normalize_required_name(name)?;
     let email = normalize_email(email)?;
+    let image = normalize_optional_image(image);
+    let hashed_password = password::hash_password(plain_password.to_string()).await?;
+    let now = Utc::now();
 
-    let existing = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE email = $1")
-        .bind(&email)
-        .fetch_one(pool)
-        .await?;
+    let mut tx = pool.begin().await?;
+    let existing_user = sqlx::query_as::<_, (Uuid, bool, bool)>(
+        r#"SELECT id, is_active, is_verified
+           FROM users
+           WHERE email = $1
+           FOR UPDATE"#,
+    )
+    .bind(&email)
+    .fetch_optional(&mut *tx)
+    .await?;
 
-    if existing > 0 {
-        return Err(AppError::Conflict("Email already registered".to_string()));
-    }
+    let user_id = match existing_user {
+        Some((existing_user_id, is_active, is_verified)) => {
+            if !is_active {
+                return Err(AppError::Forbidden("Account is suspended".to_string()));
+            }
+
+            if is_verified {
+                return Err(AppError::Conflict("Email already registered".to_string()));
+            }
+
+            sqlx::query(
+                r#"UPDATE users
+                   SET name = $1, image = $2, password_hash = $3, updated_at = $4
+                   WHERE id = $5"#,
+            )
+            .bind(&name)
+            .bind(image.as_deref())
+            .bind(&hashed_password)
+            .bind(now)
+            .bind(existing_user_id)
+            .execute(&mut *tx)
+            .await?;
+
+            existing_user_id
+        }
+        None => {
+            let new_user_id = Uuid::now_v7();
+
+            sqlx::query(
+                r#"INSERT INTO users (id, name, email, image, password_hash, role, is_active, is_verified, created_at, updated_at)
+                   VALUES ($1, $2, $3, $4, $5, 'USER', TRUE, FALSE, $6, $6)"#,
+            )
+            .bind(new_user_id)
+            .bind(&name)
+            .bind(&email)
+            .bind(image.as_deref())
+            .bind(&hashed_password)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+
+            new_user_id
+        }
+    };
 
     let code = jwt::generate_verification_code();
     let code_hash = hash_verification_code(
@@ -82,16 +142,13 @@ pub async fn create_email_verification(
         &email,
         &code,
     );
-    let hashed_password = password::hash_password(plain_password.to_string()).await?;
     let expires_at = Utc::now() + Duration::minutes(EMAIL_VERIFICATION_EXPIRY_MINUTES);
 
-    let mut tx = pool.begin().await?;
     replace_email_verification(
         &mut tx,
         &email,
         EMAIL_VERIFICATION_PURPOSE_REGISTER,
-        None,
-        Some(&hashed_password),
+        Some(user_id),
         &code_hash,
         expires_at,
     )
@@ -114,69 +171,163 @@ pub async fn clear_pending_email_verification(pool: &PgPool, email: &str) -> Res
     Ok(())
 }
 
-/// Verify email code and create user (does NOT return tokens — user must login separately)
-pub async fn verify_email_and_create_user(
+/// Verify email code, activate the user, and issue tokens.
+pub async fn verify_email_and_issue_tokens(
     pool: &PgPool,
     email: &str,
     code: &str,
     config: &AppConfig,
-) -> Result<MessageResponse, AppError> {
+) -> Result<AuthTokens, AppError> {
     let email = normalize_email(email)?;
     let mut tx = pool.begin().await?;
 
-    let record = match load_and_validate_email_verification(
-        &mut tx,
-        &email,
-        EMAIL_VERIFICATION_PURPOSE_REGISTER,
-        None,
-        code,
-        &config.jwt_secret,
+    let user = sqlx::query_as::<_, (Uuid, String, String, Option<String>, String, bool, bool)>(
+        r#"SELECT id, name, email, image, role, is_active, is_verified
+           FROM users
+           WHERE email = $1
+           FOR UPDATE"#,
     )
-    .await
-    {
-        Ok(record) => record,
-        Err(err) => {
-            tx.commit().await?;
-            return Err(err);
-        }
-    };
-
-    let password_hash = record
-        .password_hash
-        .as_deref()
-        .ok_or_else(|| AppError::Internal("Missing password hash for registration".to_string()))?;
-
-    let existing = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE email = $1")
-        .bind(&email)
-        .fetch_one(&mut *tx)
-        .await?;
-
-    if existing > 0 {
-        delete_email_verification(&mut tx, record.id).await?;
-        tx.commit().await?;
-        return Err(AppError::Conflict("Email already registered".to_string()));
-    }
-
-    let user_id = Uuid::now_v7();
-    let now = Utc::now();
-
-    sqlx::query(
-        r#"INSERT INTO users (id, email, password_hash, role, is_active, is_verified, created_at, updated_at)
-           VALUES ($1, $2, $3, 'USER', TRUE, TRUE, $4, $4)"#,
-    )
-    .bind(user_id)
-    .bind(&record.email)
-    .bind(password_hash)
-    .bind(now)
-    .execute(&mut *tx)
+    .bind(&email)
+    .fetch_optional(&mut *tx)
     .await?;
 
-    delete_email_verification(&mut tx, record.id).await?;
-    tx.commit().await?;
+    match user {
+        Some((user_id, user_name, user_email, user_image, role, is_active, is_verified)) => {
+            if !is_active {
+                tx.commit().await?;
+                return Err(AppError::Forbidden("Account is suspended".to_string()));
+            }
 
-    Ok(MessageResponse {
-        message: "Email verified successfully. Please login to continue.".to_string(),
-    })
+            if is_verified {
+                tx.commit().await?;
+                return Err(AppError::BadRequest("Email already verified".to_string()));
+            }
+
+            let record = match load_and_validate_email_verification(
+                &mut tx,
+                &email,
+                EMAIL_VERIFICATION_PURPOSE_REGISTER,
+                Some(user_id),
+                code,
+                &config.jwt_secret,
+            )
+            .await
+            {
+                Ok(record) => record,
+                Err(err) => {
+                    tx.commit().await?;
+                    return Err(err);
+                }
+            };
+
+            let now = Utc::now();
+
+            sqlx::query(
+                r#"UPDATE users
+                   SET is_verified = TRUE, updated_at = $1
+                   WHERE id = $2"#,
+            )
+            .bind(now)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+
+            delete_email_verification(&mut tx, record.id).await?;
+            tx.commit().await?;
+
+            let access_token = jwt::create_access_token(
+                user_id,
+                &role,
+                &config.jwt_secret,
+                config.jwt_access_expiry_minutes,
+            )?;
+            let refresh_token = create_refresh_token(pool, user_id, config).await?;
+
+            Ok(AuthTokens {
+                access_token,
+                refresh_token,
+                user: UserInfo {
+                    id: user_id,
+                    name: user_name,
+                    email: user_email,
+                    image: user_image,
+                    role,
+                },
+            })
+        }
+        None => {
+            let record = match load_and_validate_email_verification(
+                &mut tx,
+                &email,
+                EMAIL_VERIFICATION_PURPOSE_REGISTER,
+                None,
+                code,
+                &config.jwt_secret,
+            )
+            .await
+            {
+                Ok(record) => record,
+                Err(err) => {
+                    tx.commit().await?;
+                    return Err(err);
+                }
+            };
+
+            let password_hash = record.password_hash.as_deref().ok_or_else(|| {
+                AppError::Internal(
+                    "Missing password hash for legacy pending registration".to_string(),
+                )
+            })?;
+            let user_id = Uuid::now_v7();
+            let name = record
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| fallback_user_name(&record.email));
+            let image = normalize_optional_image(record.image.as_deref());
+            let now = Utc::now();
+            let role = "USER".to_string();
+
+            sqlx::query(
+                r#"INSERT INTO users (id, name, email, image, password_hash, role, is_active, is_verified, created_at, updated_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, TRUE, TRUE, $7, $7)"#,
+            )
+            .bind(user_id)
+            .bind(&name)
+            .bind(&record.email)
+            .bind(image.as_deref())
+            .bind(password_hash)
+            .bind(&role)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+
+            delete_email_verification(&mut tx, record.id).await?;
+            tx.commit().await?;
+
+            let access_token = jwt::create_access_token(
+                user_id,
+                &role,
+                &config.jwt_secret,
+                config.jwt_access_expiry_minutes,
+            )?;
+            let refresh_token = create_refresh_token(pool, user_id, config).await?;
+
+            Ok(AuthTokens {
+                access_token,
+                refresh_token,
+                user: UserInfo {
+                    id: user_id,
+                    name,
+                    email: record.email,
+                    image,
+                    role,
+                },
+            })
+        }
+    }
 }
 
 /// Authenticate user with email/password and return tokens
@@ -188,8 +339,20 @@ pub async fn login(
 ) -> Result<AuthTokens, AppError> {
     let email = normalize_email(email)?;
 
-    let user = sqlx::query_as::<_, (Uuid, String, Option<String>, String, bool, bool)>(
-        r#"SELECT id, email, password_hash, role, is_active, is_verified
+    let user = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            bool,
+            bool,
+        ),
+    >(
+        r#"SELECT id, name, email, image, password_hash, role, is_active, is_verified
            FROM users WHERE email = $1"#,
     )
     .bind(&email)
@@ -197,7 +360,8 @@ pub async fn login(
     .await?
     .ok_or_else(|| AppError::Unauthorized("Invalid email or password".to_string()))?;
 
-    let (user_id, user_email, password_hash, role, is_active, is_verified) = user;
+    let (user_id, user_name, user_email, user_image, password_hash, role, is_active, is_verified) =
+        user;
 
     if !is_active {
         return Err(AppError::Forbidden("Account is suspended".to_string()));
@@ -231,7 +395,9 @@ pub async fn login(
         refresh_token,
         user: UserInfo {
             id: user_id,
+            name: user_name,
             email: user_email,
+            image: user_image,
             role,
         },
     })
@@ -267,19 +433,21 @@ pub async fn google_login(
     }
 
     let email = normalize_email(&token_info.email)?;
+    let name = coerce_oauth_user_name(token_info.name.as_deref(), &email);
+    let image = normalize_optional_image(token_info.picture.as_deref());
     let google_id = token_info.sub;
 
     let mut tx = pool.begin().await?;
 
-    let user = sqlx::query_as::<_, (Uuid, String, bool)>(
-        r#"SELECT id, role, is_active FROM users WHERE email = $1"#,
+    let user = sqlx::query_as::<_, (Uuid, String, Option<String>, String, bool)>(
+        r#"SELECT id, name, image, role, is_active FROM users WHERE email = $1"#,
     )
     .bind(&email)
     .fetch_optional(&mut *tx)
     .await?;
 
-    let (user_id, role, _is_active) = match user {
-        Some((id, role, is_active)) => {
+    let (user_id, user_name, user_image, role, _is_active) = match user {
+        Some((id, existing_name, existing_image, role, is_active)) => {
             if !is_active {
                 return Err(AppError::Forbidden("Account is suspended".to_string()));
             }
@@ -290,23 +458,25 @@ pub async fn google_login(
             .bind(id)
             .execute(&mut *tx)
             .await?;
-            (id, role, is_active)
+            (id, existing_name, existing_image, role, is_active)
         }
         None => {
             let new_user_id = Uuid::now_v7();
             let now = Utc::now();
 
             sqlx::query(
-                r#"INSERT INTO users (id, email, password_hash, role, is_active, is_verified, created_at, updated_at)
-                   VALUES ($1, $2, NULL, 'USER', TRUE, TRUE, $3, $3)"#,
+                r#"INSERT INTO users (id, name, email, image, password_hash, role, is_active, is_verified, created_at, updated_at)
+                   VALUES ($1, $2, $3, $4, NULL, 'USER', TRUE, TRUE, $5, $5)"#,
             )
             .bind(new_user_id)
+            .bind(&name)
             .bind(&email)
+            .bind(image.as_deref())
             .bind(now)
             .execute(&mut *tx)
             .await?;
 
-            (new_user_id, "USER".to_string(), true)
+            (new_user_id, name, image, "USER".to_string(), true)
         }
     };
 
@@ -336,7 +506,9 @@ pub async fn google_login(
         refresh_token,
         user: UserInfo {
             id: user_id,
+            name: user_name,
             email,
+            image: user_image,
             role,
         },
     })
@@ -437,18 +609,20 @@ pub async fn github_login(
             AppError::Unauthorized("No primary, verified email found on GitHub".to_string())
         })?;
     let primary_email = normalize_email(&primary_email)?;
+    let name = coerce_oauth_user_name(github_user.name.as_deref(), &primary_email);
+    let image = normalize_optional_image(github_user.avatar_url.as_deref());
 
     let mut tx = pool.begin().await?;
 
-    let user = sqlx::query_as::<_, (Uuid, String, bool)>(
-        r#"SELECT id, role, is_active FROM users WHERE email = $1"#,
+    let user = sqlx::query_as::<_, (Uuid, String, Option<String>, String, bool)>(
+        r#"SELECT id, name, image, role, is_active FROM users WHERE email = $1"#,
     )
     .bind(&primary_email)
     .fetch_optional(&mut *tx)
     .await?;
 
-    let (user_id, role, _is_active) = match user {
-        Some((id, role, is_active)) => {
+    let (user_id, user_name, user_image, role, _is_active) = match user {
+        Some((id, existing_name, existing_image, role, is_active)) => {
             if !is_active {
                 return Err(AppError::Forbidden("Account is suspended".to_string()));
             }
@@ -459,23 +633,25 @@ pub async fn github_login(
             .bind(id)
             .execute(&mut *tx)
             .await?;
-            (id, role, is_active)
+            (id, existing_name, existing_image, role, is_active)
         }
         None => {
             let new_user_id = Uuid::now_v7();
             let now = Utc::now();
 
             sqlx::query(
-                r#"INSERT INTO users (id, email, password_hash, role, is_active, is_verified, created_at, updated_at)
-                   VALUES ($1, $2, NULL, 'USER', TRUE, TRUE, $3, $3)"#,
+                r#"INSERT INTO users (id, name, email, image, password_hash, role, is_active, is_verified, created_at, updated_at)
+                   VALUES ($1, $2, $3, $4, NULL, 'USER', TRUE, TRUE, $5, $5)"#,
             )
             .bind(new_user_id)
+            .bind(&name)
             .bind(&primary_email)
+            .bind(image.as_deref())
             .bind(now)
             .execute(&mut *tx)
             .await?;
 
-            (new_user_id, "USER".to_string(), true)
+            (new_user_id, name, image, "USER".to_string(), true)
         }
     };
 
@@ -505,7 +681,9 @@ pub async fn github_login(
         refresh_token,
         user: UserInfo {
             id: user_id,
+            name: user_name,
             email: primary_email,
+            image: user_image,
             role,
         },
     })
@@ -564,8 +742,8 @@ pub async fn exchange_oauth_login_ticket(
         ));
     }
 
-    let user = sqlx::query_as::<_, (Uuid, String, String)>(
-        r#"SELECT id, email, role
+    let user = sqlx::query_as::<_, (Uuid, String, String, Option<String>, String)>(
+        r#"SELECT id, name, email, image, role
            FROM users
            WHERE id = $1 AND is_active = TRUE"#,
     )
@@ -576,12 +754,18 @@ pub async fn exchange_oauth_login_ticket(
 
     tx.commit().await?;
 
-    let (id, email, role) = user;
+    let (id, name, email, image, role) = user;
 
     Ok(AuthTokens {
         access_token,
         refresh_token,
-        user: UserInfo { id, email, role },
+        user: UserInfo {
+            id,
+            name,
+            email,
+            image,
+            role,
+        },
     })
 }
 
@@ -613,15 +797,15 @@ pub async fn rotate_refresh_token(
         ));
     }
 
-    let user = sqlx::query_as::<_, (Uuid, String, String)>(
-        "SELECT id, email, role FROM users WHERE id = $1 AND is_active = TRUE",
+    let user = sqlx::query_as::<_, (Uuid, String, String, Option<String>, String)>(
+        "SELECT id, name, email, image, role FROM users WHERE id = $1 AND is_active = TRUE",
     )
     .bind(user_id)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| AppError::Unauthorized("User not found or inactive".to_string()))?;
 
-    let (uid, email, role) = user;
+    let (uid, name, email, image, role) = user;
 
     let access_token = jwt::create_access_token(
         uid,
@@ -638,7 +822,9 @@ pub async fn rotate_refresh_token(
         refresh_token: new_refresh_token,
         user: UserInfo {
             id: uid,
+            name,
             email,
+            image,
             role,
         },
     })
@@ -665,7 +851,6 @@ async fn replace_email_verification(
     email: &str,
     purpose: &str,
     user_id: Option<Uuid>,
-    password_hash: Option<&str>,
     code_hash: &str,
     expires_at: chrono::DateTime<Utc>,
 ) -> Result<(), AppError> {
@@ -685,13 +870,12 @@ async fn replace_email_verification(
 
     sqlx::query(
         r#"INSERT INTO email_verifications
-           (id, email, code_hash, password_hash, user_id, purpose, expires_at, attempt_count)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, 0)"#,
+           (id, email, code_hash, user_id, purpose, expires_at, attempt_count)
+           VALUES ($1, $2, $3, $4, $5, $6, 0)"#,
     )
     .bind(Uuid::now_v7())
     .bind(email)
     .bind(code_hash)
-    .bind(password_hash)
     .bind(user_id)
     .bind(purpose)
     .bind(expires_at)
@@ -710,7 +894,7 @@ async fn load_and_validate_email_verification(
     secret: &str,
 ) -> Result<EmailVerificationRecord, AppError> {
     let record = sqlx::query_as::<_, EmailVerificationRecord>(
-        r#"SELECT id, email, code_hash, password_hash, expires_at, attempt_count
+        r#"SELECT id, email, name, image, code_hash, password_hash, expires_at, attempt_count
            FROM email_verifications
            WHERE email = $1 AND purpose = $2 AND user_id IS NOT DISTINCT FROM $3
            ORDER BY created_at DESC

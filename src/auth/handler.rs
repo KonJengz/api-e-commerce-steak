@@ -295,20 +295,26 @@ async fn register(
     body.validate()
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
+    let email = body.email.trim();
     let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
-    apply_ip_and_email_limit(&state, "register", &client_ip, &body.email, 10, 3).await?;
+    apply_ip_and_email_limit(&state, "register", &client_ip, email, 10, 3).await?;
 
-    let code =
-        service::create_email_verification(&state.pool, &body.email, &body.password, &state.config)
-            .await?;
+    let code = service::create_email_verification(
+        &state.pool,
+        &body.name,
+        email,
+        &body.password,
+        body.image.as_deref(),
+        &state.config,
+    )
+    .await?;
 
-    if let Err(send_error) = email::send_verification_email(&body.email, &code, &state.config).await
-    {
+    if let Err(send_error) = email::send_verification_email(email, &code, &state.config).await {
         if let Err(cleanup_error) =
-            service::clear_pending_email_verification(&state.pool, &body.email).await
+            service::clear_pending_email_verification(&state.pool, email).await
         {
             tracing::error!(
-                email = %body.email,
+                email = %email,
                 error = %cleanup_error,
                 "failed to clean up pending registration verification after email send failure"
             );
@@ -327,18 +333,30 @@ async fn verify_email(
     headers: HeaderMap,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<VerifyEmailRequest>,
-) -> Result<Json<MessageResponse>, AppError> {
+) -> Result<impl IntoResponse, AppError> {
     body.validate()
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
     apply_ip_and_email_limit(&state, "verify_email", &client_ip, &body.email, 20, 5).await?;
 
-    let response =
-        service::verify_email_and_create_user(&state.pool, &body.email, &body.code, &state.config)
+    let tokens =
+        service::verify_email_and_issue_tokens(&state.pool, &body.email, &body.code, &state.config)
             .await?;
+    let cookie = build_refresh_cookie(
+        &tokens.refresh_token,
+        state.config.jwt_refresh_expiry_days,
+        state.config.cookie_secure,
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(SET_COOKIE, cookie.parse().unwrap());
 
-    Ok(Json(response))
+    let body = AuthResponse {
+        access_token: tokens.access_token,
+        user: tokens.user,
+    };
+
+    Ok((headers, Json(body)))
 }
 
 async fn login(
@@ -350,10 +368,12 @@ async fn login(
     body.validate()
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
+    let email = body.email.trim();
+    let password = body.password.trim();
     let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
-    apply_ip_and_email_limit(&state, "login", &client_ip, &body.email, 20, 10).await?;
+    apply_ip_and_email_limit(&state, "login", &client_ip, email, 20, 10).await?;
 
-    let tokens = service::login(&state.pool, &body.email, &body.password, &state.config).await?;
+    let tokens = service::login(&state.pool, email, password, &state.config).await?;
     let cookie = build_refresh_cookie(
         &tokens.refresh_token,
         state.config.jwt_refresh_expiry_days,

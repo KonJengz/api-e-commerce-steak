@@ -26,7 +26,7 @@ struct EmailChangeVerificationRecord {
 /// Get user by ID
 pub async fn get_user_by_id(pool: &PgPool, user_id: Uuid) -> Result<User, AppError> {
     let user = sqlx::query_as::<_, User>(
-        r#"SELECT id, email, role, is_active, is_verified, created_at, updated_at
+        r#"SELECT id, name, email, image, role, is_active, is_verified, created_at, updated_at
            FROM users WHERE id = $1"#,
     )
     .bind(user_id)
@@ -144,7 +144,7 @@ pub async fn verify_email_change(
         r#"UPDATE users
            SET email = $1, is_verified = TRUE, updated_at = $2
            WHERE id = $3
-           RETURNING id, email, role, is_active, is_verified, created_at, updated_at"#,
+           RETURNING id, name, email, image, role, is_active, is_verified, created_at, updated_at"#,
     )
     .bind(&record.email)
     .bind(Utc::now())

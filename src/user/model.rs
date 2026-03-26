@@ -7,7 +7,9 @@ use validator::Validate;
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct User {
     pub id: Uuid,
+    pub name: String,
     pub email: String,
+    pub image: Option<String>,
     pub role: String,
     pub is_active: bool,
     pub is_verified: bool,
@@ -19,7 +21,9 @@ pub struct User {
 #[derive(Debug, Serialize)]
 pub struct UserProfileResponse {
     pub id: Uuid,
+    pub name: String,
     pub email: String,
+    pub image: Option<String>,
     pub role: String,
     pub is_active: bool,
     pub is_verified: bool,
@@ -30,7 +34,9 @@ impl From<User> for UserProfileResponse {
     fn from(u: User) -> Self {
         Self {
             id: u.id,
+            name: u.name,
             email: u.email,
+            image: u.image,
             role: u.role,
             is_active: u.is_active,
             is_verified: u.is_verified,

@@ -4,13 +4,15 @@ use std::time::Duration;
 use axum::{
     Json, Router,
     extract::{ConnectInfo, DefaultBodyLimit, Multipart, State},
-    http::HeaderMap,
+    http::{HeaderMap, header::SET_COOKIE},
+    response::IntoResponse,
     routing::{get, post, put},
 };
 use validator::Validate;
 
 use crate::AppState;
 use crate::auth::model::MessageResponse;
+use crate::auth::{model as auth_model, service as auth_service};
 use crate::shared::cloudinary;
 use crate::shared::email;
 use crate::shared::errors::AppError;
@@ -24,6 +26,7 @@ use super::service;
 const MAX_IMAGE_SIZE_BYTES: usize = 5 * 1024 * 1024;
 const MAX_MULTIPART_BODY_SIZE_BYTES: usize = 6 * 1024 * 1024;
 const ALLOWED_IMAGE_CONTENT_TYPES: [&str; 3] = ["image/jpeg", "image/png", "image/webp"];
+const REFRESH_TOKEN_COOKIE: &str = "refresh_token";
 
 #[derive(Debug)]
 struct UploadedProfileImage {
@@ -39,8 +42,18 @@ pub fn router() -> Router<AppState> {
 
     Router::new()
         .route("/me", get(get_profile).put(request_email_change))
+        .route("/me/password", put(change_password))
+        .route("/me/set-password", post(set_password))
         .route("/me/verify-email-change", post(verify_email_change))
         .merge(profile_router)
+}
+
+fn build_clear_refresh_cookie(cookie_secure: bool) -> String {
+    let secure_flag = if cookie_secure { "Secure; " } else { "" };
+    format!(
+        "{}=; HttpOnly; {}SameSite=Strict; Path=/api/auth; Max-Age=0",
+        REFRESH_TOKEN_COOKIE, secure_flag
+    )
 }
 
 async fn apply_rate_limit(
@@ -266,6 +279,78 @@ async fn verify_email_change(
     .await?;
 
     Ok(Json(UserProfileResponse::from(user)))
+}
+
+async fn change_password(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<auth_model::ChangePasswordRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    body.validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
+    apply_rate_limit(
+        &state,
+        format!("user:change_password:{}:{}", client_ip, auth.user_id),
+        "change_password",
+        10,
+    )
+    .await?;
+
+    auth_service::change_password(
+        &state.pool,
+        auth.user_id,
+        &body.current_password,
+        &body.new_password,
+    )
+    .await?;
+
+    let clear_cookie = build_clear_refresh_cookie(state.config.cookie_secure);
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(SET_COOKIE, clear_cookie.parse().unwrap());
+
+    Ok((
+        response_headers,
+        Json(MessageResponse {
+            message: "Password changed successfully. Please log in again.".to_string(),
+        }),
+    ))
+}
+
+async fn set_password(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<auth_model::SetPasswordRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    body.validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
+    apply_rate_limit(
+        &state,
+        format!("user:set_password:{}:{}", client_ip, auth.user_id),
+        "set_password",
+        10,
+    )
+    .await?;
+
+    auth_service::set_password(&state.pool, auth.user_id, &body.new_password).await?;
+
+    let clear_cookie = build_clear_refresh_cookie(state.config.cookie_secure);
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(SET_COOKIE, clear_cookie.parse().unwrap());
+
+    Ok((
+        response_headers,
+        Json(MessageResponse {
+            message: "Password set successfully. Please log in again.".to_string(),
+        }),
+    ))
 }
 
 fn validate_uploaded_image(file_data: &[u8], content_type: &str) -> Result<(), AppError> {

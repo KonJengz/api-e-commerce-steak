@@ -11,6 +11,8 @@ use crate::shared::security::USER_NAME_MAX_LEN;
 const LOGIN_EMAIL_MAX_LEN: usize = 255;
 const LOGIN_PASSWORD_MIN_LEN: usize = 6;
 const LOGIN_PASSWORD_MAX_LEN: usize = 128;
+const ACCOUNT_PASSWORD_MIN_LEN: usize = 8;
+const ACCOUNT_PASSWORD_MAX_LEN: usize = 128;
 
 fn validation_error(message: &'static str, code: &'static str) -> ValidationError {
     let mut error = ValidationError::new(code);
@@ -85,6 +87,52 @@ fn validate_login_password(password: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
+fn validate_current_password(password: &str) -> Result<(), ValidationError> {
+    let password = password.trim();
+    let password_len = password.chars().count();
+
+    if password.is_empty() {
+        return Err(validation_error(
+            "Current password is required.",
+            "required",
+        ));
+    }
+
+    if password_len > ACCOUNT_PASSWORD_MAX_LEN {
+        return Err(validation_error(
+            "Current password must be at most 128 characters.",
+            "max_length",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_account_password(password: &str) -> Result<(), ValidationError> {
+    let password = password.trim();
+    let password_len = password.chars().count();
+
+    if password.is_empty() {
+        return Err(validation_error("Password is required.", "required"));
+    }
+
+    if password_len < ACCOUNT_PASSWORD_MIN_LEN {
+        return Err(validation_error(
+            "Password must be at least 8 characters.",
+            "min_length",
+        ));
+    }
+
+    if password_len > ACCOUNT_PASSWORD_MAX_LEN {
+        return Err(validation_error(
+            "Password must be at most 128 characters.",
+            "max_length",
+        ));
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Deserialize, Validate)]
 pub struct RegisterRequest {
     #[validate(custom(function = "validate_required_name"))]
@@ -94,7 +142,7 @@ pub struct RegisterRequest {
         length(max = 255, message = "Email must be at most 255 characters.")
     )]
     pub email: String,
-    #[validate(length(min = 8, message = "Password must be at least 8 characters"))]
+    #[validate(custom(function = "validate_account_password"))]
     pub password: String,
     pub image: Option<String>,
 }
@@ -122,6 +170,22 @@ pub struct LoginRequest {
 }
 
 #[derive(Debug, Deserialize, Validate)]
+pub struct ForgotPasswordRequest {
+    #[validate(custom(function = "validate_login_email"))]
+    pub email: String,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct ResetPasswordRequest {
+    #[validate(custom(function = "validate_login_email"))]
+    pub email: String,
+    #[validate(length(equal = 6, message = "Code must be 6 digits"))]
+    pub code: String,
+    #[validate(custom(function = "validate_account_password"))]
+    pub new_password: String,
+}
+
+#[derive(Debug, Deserialize, Validate)]
 pub struct GoogleLoginRequest {
     #[validate(length(min = 1, message = "Token cannot be empty"))]
     pub token: String,
@@ -142,6 +206,20 @@ pub struct OauthExchangeRequest {
 #[derive(Debug, Deserialize)]
 pub struct OauthLinkStartRequest {
     pub redirect_to: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct ChangePasswordRequest {
+    #[validate(custom(function = "validate_current_password"))]
+    pub current_password: String,
+    #[validate(custom(function = "validate_account_password"))]
+    pub new_password: String,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct SetPasswordRequest {
+    #[validate(custom(function = "validate_account_password"))]
+    pub new_password: String,
 }
 
 // ─── Response DTOs ──────────────────────────────────────────
@@ -258,6 +336,33 @@ mod tests {
         };
 
         request.validate().expect("validation should pass");
+    }
+
+    #[test]
+    fn reset_password_request_rejects_short_new_password_after_trim() {
+        let request = ResetPasswordRequest {
+            email: "user@example.com".to_string(),
+            code: "123456".to_string(),
+            new_password: "  1234567  ".to_string(),
+        };
+
+        let error = request.validate().expect_err("validation should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("Password must be at least 8 characters.")
+        );
+    }
+
+    #[test]
+    fn change_password_request_requires_current_password() {
+        let request = ChangePasswordRequest {
+            current_password: "   ".to_string(),
+            new_password: "new-password".to_string(),
+        };
+
+        let error = request.validate().expect_err("validation should fail");
+        assert!(error.to_string().contains("Current password is required."));
     }
 
     #[test]

@@ -50,6 +50,31 @@ pub async fn send_verification_email(
     send_email(to, subject, &body, config).await
 }
 
+/// Send a password-reset email with a 6-digit code
+pub async fn send_password_reset_email(
+    to: &str,
+    code: &str,
+    config: &AppConfig,
+) -> Result<(), AppError> {
+    let subject = "Reset your password";
+    let body = format!(
+        r#"<html>
+<body style="font-family: Arial, sans-serif; padding: 20px;">
+    <h2>Password Reset</h2>
+    <p>Use the following code to reset your password:</p>
+    <div style="background: #f0f0f0; padding: 20px; text-align: center; font-size: 32px; font-weight: bold; letter-spacing: 8px; margin: 20px 0;">
+        {}
+    </div>
+    <p>This code will expire in 15 minutes.</p>
+    <p>If you didn't request a password reset, you can ignore this email.</p>
+</body>
+</html>"#,
+        code
+    );
+
+    send_email(to, subject, &body, config).await
+}
+
 /// Send an order confirmation email
 pub async fn send_order_confirmation(
     to: &str,

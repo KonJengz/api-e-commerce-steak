@@ -6,6 +6,7 @@ use super::errors::AppError;
 
 pub const EMAIL_VERIFICATION_PURPOSE_REGISTER: &str = "REGISTER";
 pub const EMAIL_VERIFICATION_PURPOSE_EMAIL_CHANGE: &str = "CHANGE_EMAIL";
+pub const EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET: &str = "RESET_PASSWORD";
 pub const USER_NAME_MAX_LEN: usize = 100;
 
 fn hash_segments(secret: &str, segments: &[&str]) -> String {

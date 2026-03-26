@@ -8,9 +8,9 @@ use crate::shared::errors::AppError;
 use crate::shared::jwt;
 use crate::shared::password;
 use crate::shared::security::{
-    EMAIL_VERIFICATION_PURPOSE_REGISTER, coerce_oauth_user_name, fallback_user_name,
-    hash_oauth_login_ticket, hash_refresh_token, hash_verification_code, normalize_email,
-    normalize_optional_image, normalize_required_name,
+    EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET, EMAIL_VERIFICATION_PURPOSE_REGISTER,
+    coerce_oauth_user_name, fallback_user_name, hash_oauth_login_ticket, hash_refresh_token,
+    hash_verification_code, normalize_email, normalize_optional_image, normalize_required_name,
 };
 
 use super::model::{AuthTokens, UserInfo};
@@ -140,7 +140,7 @@ pub async fn create_email_verification(
     let name = normalize_required_name(name)?;
     let email = normalize_email(email)?;
     let image = normalize_optional_image(image);
-    let hashed_password = password::hash_password(plain_password.to_string()).await?;
+    let hashed_password = password::hash_password(plain_password.trim().to_string()).await?;
     let now = Utc::now();
 
     let mut tx = pool.begin().await?;
@@ -334,6 +334,71 @@ pub async fn resend_email_verification(
     tx.commit().await?;
 
     Ok(code)
+}
+
+pub async fn request_password_reset(
+    pool: &PgPool,
+    email: &str,
+    config: &AppConfig,
+) -> Result<Option<String>, AppError> {
+    let email = normalize_email(email)?;
+
+    let user = sqlx::query_as::<_, (bool, bool)>(
+        r#"SELECT is_active, is_verified
+           FROM users
+           WHERE email = $1"#,
+    )
+    .bind(&email)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some((is_active, is_verified)) = user else {
+        return Ok(None);
+    };
+
+    if !is_active || !is_verified {
+        return Ok(None);
+    }
+
+    let code = jwt::generate_verification_code();
+    let code_hash = hash_verification_code(
+        &config.jwt_secret,
+        EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET,
+        &email,
+        &code,
+    );
+    let expires_at = Utc::now() + Duration::minutes(EMAIL_VERIFICATION_EXPIRY_MINUTES);
+
+    let mut tx = pool.begin().await?;
+    replace_email_verification(
+        &mut tx,
+        &email,
+        EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET,
+        None,
+        VerificationSnapshot {
+            name: None,
+            image: None,
+            password_hash: None,
+        },
+        &code_hash,
+        expires_at,
+    )
+    .await?;
+    tx.commit().await?;
+
+    Ok(Some(code))
+}
+
+pub async fn clear_pending_password_reset(pool: &PgPool, email: &str) -> Result<(), AppError> {
+    let email = normalize_email(email)?;
+
+    sqlx::query("DELETE FROM email_verifications WHERE purpose = $1 AND email = $2")
+        .bind(EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET)
+        .bind(email)
+        .execute(pool)
+        .await?;
+
+    Ok(())
 }
 
 /// Verify email code, activate the user, and issue tokens.
@@ -566,6 +631,199 @@ pub async fn login(
             role,
         },
     })
+}
+
+pub async fn reset_password(
+    pool: &PgPool,
+    email: &str,
+    code: &str,
+    new_password: &str,
+    config: &AppConfig,
+) -> Result<(), AppError> {
+    let email = normalize_email(email)?;
+    let new_password = new_password.trim();
+    let mut tx = pool.begin().await?;
+
+    let record = match load_and_validate_email_verification(
+        &mut tx,
+        &email,
+        EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET,
+        None,
+        code,
+        &config.jwt_secret,
+    )
+    .await
+    {
+        Ok(record) => record,
+        Err(err) => {
+            tx.commit().await?;
+            return Err(err);
+        }
+    };
+
+    let user = sqlx::query_as::<_, (Uuid, Option<String>, bool, bool)>(
+        r#"SELECT id, password_hash, is_active, is_verified
+           FROM users
+           WHERE email = $1
+           FOR UPDATE"#,
+    )
+    .bind(&email)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::BadRequest("Invalid password reset request".to_string()))?;
+
+    let (user_id, password_hash, is_active, is_verified) = user;
+
+    if !is_active {
+        tx.commit().await?;
+        return Err(AppError::Forbidden("Account is suspended".to_string()));
+    }
+
+    if !is_verified {
+        tx.commit().await?;
+        return Err(AppError::BadRequest(
+            "Email verification is required before resetting password".to_string(),
+        ));
+    }
+
+    ensure_password_is_new(password_hash.as_deref(), new_password).await?;
+    let next_password_hash = password::hash_password(new_password.to_string()).await?;
+
+    sqlx::query(
+        r#"UPDATE users
+           SET password_hash = $1, updated_at = $2
+           WHERE id = $3"#,
+    )
+    .bind(&next_password_hash)
+    .bind(Utc::now())
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    delete_email_verification(&mut tx, record.id).await?;
+    delete_refresh_tokens_for_user_in_tx(&mut tx, user_id).await?;
+    tx.commit().await?;
+
+    Ok(())
+}
+
+pub async fn change_password(
+    pool: &PgPool,
+    user_id: Uuid,
+    current_password: &str,
+    new_password: &str,
+) -> Result<(), AppError> {
+    let current_password = current_password.trim();
+    let new_password = new_password.trim();
+    let mut tx = pool.begin().await?;
+
+    let user = sqlx::query_as::<_, (Option<String>, bool)>(
+        r#"SELECT password_hash, is_active
+           FROM users
+           WHERE id = $1
+           FOR UPDATE"#,
+    )
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::Unauthorized("User no longer exists".to_string()))?;
+
+    let (password_hash, is_active) = user;
+
+    if !is_active {
+        tx.commit().await?;
+        return Err(AppError::Forbidden("Account is suspended".to_string()));
+    }
+
+    let password_hash = match password_hash {
+        Some(value) => value,
+        None => {
+            tx.commit().await?;
+            return Err(AppError::BadRequest(
+                "Password is not set for this account. Use set password instead.".to_string(),
+            ));
+        }
+    };
+
+    let is_valid =
+        password::verify_password(current_password.to_string(), password_hash.clone()).await?;
+    if !is_valid {
+        tx.commit().await?;
+        return Err(AppError::Unauthorized(
+            "Current password is incorrect".to_string(),
+        ));
+    }
+
+    ensure_password_is_new(Some(password_hash.as_str()), new_password).await?;
+    let next_password_hash = password::hash_password(new_password.to_string()).await?;
+
+    sqlx::query(
+        r#"UPDATE users
+           SET password_hash = $1, updated_at = $2
+           WHERE id = $3"#,
+    )
+    .bind(&next_password_hash)
+    .bind(Utc::now())
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    delete_refresh_tokens_for_user_in_tx(&mut tx, user_id).await?;
+    tx.commit().await?;
+
+    Ok(())
+}
+
+pub async fn set_password(
+    pool: &PgPool,
+    user_id: Uuid,
+    new_password: &str,
+) -> Result<(), AppError> {
+    let new_password = new_password.trim();
+    let mut tx = pool.begin().await?;
+
+    let user = sqlx::query_as::<_, (Option<String>, bool)>(
+        r#"SELECT password_hash, is_active
+           FROM users
+           WHERE id = $1
+           FOR UPDATE"#,
+    )
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::Unauthorized("User no longer exists".to_string()))?;
+
+    let (password_hash, is_active) = user;
+
+    if !is_active {
+        tx.commit().await?;
+        return Err(AppError::Forbidden("Account is suspended".to_string()));
+    }
+
+    if password_hash.is_some() {
+        tx.commit().await?;
+        return Err(AppError::BadRequest(
+            "Password is already set for this account. Use change password instead.".to_string(),
+        ));
+    }
+
+    let next_password_hash = password::hash_password(new_password.to_string()).await?;
+
+    sqlx::query(
+        r#"UPDATE users
+           SET password_hash = $1, updated_at = $2
+           WHERE id = $3"#,
+    )
+    .bind(&next_password_hash)
+    .bind(Utc::now())
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    delete_refresh_tokens_for_user_in_tx(&mut tx, user_id).await?;
+    tx.commit().await?;
+
+    Ok(())
 }
 
 async fn load_social_user_by_provider(
@@ -1372,6 +1630,41 @@ async fn delete_email_verification(
         .bind(verification_id)
         .execute(&mut **tx)
         .await?;
+
+    Ok(())
+}
+
+async fn delete_refresh_tokens_for_user_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM refresh_tokens WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&mut **tx)
+        .await?;
+
+    Ok(())
+}
+
+async fn ensure_password_is_new(
+    existing_password_hash: Option<&str>,
+    next_password: &str,
+) -> Result<(), AppError> {
+    let Some(existing_password_hash) = existing_password_hash else {
+        return Ok(());
+    };
+
+    let is_same = password::verify_password(
+        next_password.to_string(),
+        existing_password_hash.to_string(),
+    )
+    .await?;
+
+    if is_same {
+        return Err(AppError::BadRequest(
+            "New password must be different from the current password".to_string(),
+        ));
+    }
 
     Ok(())
 }

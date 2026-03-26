@@ -76,6 +76,8 @@ pub fn router() -> Router<AppState> {
         .route("/register", post(register))
         .route("/verify-email", post(verify_email))
         .route("/resend-verification", post(resend_verification))
+        .route("/forgot-password", post(forgot_password))
+        .route("/reset-password", post(reset_password))
         .route("/login", post(login))
         .route("/google/start", get(google_start))
         .route("/google/callback", get(google_callback))
@@ -526,6 +528,66 @@ async fn login(
     };
 
     Ok((headers, Json(body)))
+}
+
+async fn forgot_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<ForgotPasswordRequest>,
+) -> Result<Json<MessageResponse>, AppError> {
+    body.validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    let email = body.email.trim();
+    let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
+    apply_ip_and_email_limit(&state, "forgot_password", &client_ip, email, 10, 3).await?;
+
+    if let Some(code) = service::request_password_reset(&state.pool, email, &state.config).await?
+        && let Err(send_error) = email::send_password_reset_email(email, &code, &state.config).await
+    {
+        if let Err(cleanup_error) = service::clear_pending_password_reset(&state.pool, email).await
+        {
+            tracing::error!(
+                email = %email,
+                error = %cleanup_error,
+                "failed to clean up pending password reset after email send failure"
+            );
+        }
+
+        return Err(send_error);
+    }
+
+    Ok(Json(MessageResponse {
+        message: "If this email can be reset, a verification code has been sent.".to_string(),
+    }))
+}
+
+async fn reset_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<ResetPasswordRequest>,
+) -> Result<Json<MessageResponse>, AppError> {
+    body.validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    let email = body.email.trim();
+    let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
+    apply_ip_and_email_limit(&state, "reset_password", &client_ip, email, 20, 5).await?;
+
+    service::reset_password(
+        &state.pool,
+        email,
+        &body.code,
+        &body.new_password,
+        &state.config,
+    )
+    .await?;
+
+    Ok(Json(MessageResponse {
+        message: "Password reset successfully. Please log in again.".to_string(),
+    }))
 }
 
 async fn google_start(

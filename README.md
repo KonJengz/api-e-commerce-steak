@@ -6,8 +6,10 @@ REST API backend for an e-commerce platform built with Rust, Axum, and PostgreSQ
 
 - Email/password authentication with Argon2
 - Email verification and email-change verification
+- Verification resend flow and cleanup of stale unverified accounts
 - Google and GitHub login
 - JWT access tokens and rotating refresh tokens via `HttpOnly` cookies
+- User profile updates with Cloudinary avatar upload
 - Product management with admin-only image upload to Cloudinary
 - Transactional order creation with stock locking
 - Multiple user addresses with one-default-address enforcement
@@ -210,6 +212,7 @@ The app starts a cleanup worker on boot. It currently handles:
 
 - expired refresh tokens
 - expired email verification records
+- unverified users inactive for more than 7 days
 - expired pending product image uploads
 - queued product image deletions
 

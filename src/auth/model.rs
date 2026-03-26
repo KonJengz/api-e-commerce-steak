@@ -101,10 +101,16 @@ pub struct RegisterRequest {
 
 #[derive(Debug, Deserialize, Validate)]
 pub struct VerifyEmailRequest {
-    #[validate(email(message = "Invalid email address"))]
+    #[validate(custom(function = "validate_login_email"))]
     pub email: String,
     #[validate(length(equal = 6, message = "Code must be 6 digits"))]
     pub code: String,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct ResendVerificationRequest {
+    #[validate(custom(function = "validate_login_email"))]
+    pub email: String,
 }
 
 #[derive(Debug, Deserialize, Validate)]
@@ -242,5 +248,15 @@ mod tests {
         };
 
         request.validate().expect("validation should pass");
+    }
+
+    #[test]
+    fn resend_verification_request_rejects_blank_email_after_trim() {
+        let request = ResendVerificationRequest {
+            email: "   ".to_string(),
+        };
+
+        let error = request.validate().expect_err("validation should fail");
+        assert!(error.to_string().contains("Email is required."));
     }
 }

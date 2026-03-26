@@ -7,9 +7,10 @@ use crate::shared::errors::AppError;
 use crate::shared::jwt;
 use crate::shared::security::{
     EMAIL_VERIFICATION_PURPOSE_EMAIL_CHANGE, hash_verification_code, normalize_email,
+    normalize_required_name,
 };
 
-use super::model::User;
+use super::model::{ProfileImageUpdate, User};
 
 const EMAIL_VERIFICATION_EXPIRY_MINUTES: i64 = 15;
 const MAX_EMAIL_VERIFICATION_ATTEMPTS: i32 = 5;
@@ -23,10 +24,17 @@ struct EmailChangeVerificationRecord {
     attempt_count: i32,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct ExistingProfileState {
+    name: String,
+    image: Option<String>,
+    image_public_id: Option<String>,
+}
+
 /// Get user by ID
 pub async fn get_user_by_id(pool: &PgPool, user_id: Uuid) -> Result<User, AppError> {
     let user = sqlx::query_as::<_, User>(
-        r#"SELECT id, name, email, image, role, is_active, is_verified, created_at, updated_at
+        r#"SELECT id, name, email, image, image_public_id, role, is_active, is_verified, created_at, updated_at
            FROM users WHERE id = $1"#,
     )
     .bind(user_id)
@@ -35,6 +43,79 @@ pub async fn get_user_by_id(pool: &PgPool, user_id: Uuid) -> Result<User, AppErr
     .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     Ok(user)
+}
+
+pub async fn update_profile(
+    pool: &PgPool,
+    user_id: Uuid,
+    name: Option<&str>,
+    image_update: ProfileImageUpdate<'_>,
+) -> Result<(User, Option<String>), AppError> {
+    let mut tx = pool.begin().await?;
+
+    let existing = sqlx::query_as::<_, ExistingProfileState>(
+        r#"SELECT name, image, image_public_id
+           FROM users
+           WHERE id = $1
+           FOR UPDATE"#,
+    )
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    let next_name = match name {
+        Some(value) => normalize_required_name(value)?,
+        None => existing.name.clone(),
+    };
+
+    let (next_image, next_image_public_id, previous_image_public_id) = match image_update {
+        ProfileImageUpdate::Keep => (
+            existing.image.clone(),
+            existing.image_public_id.clone(),
+            None,
+        ),
+        ProfileImageUpdate::Remove => (None, None, existing.image_public_id.clone()),
+        ProfileImageUpdate::Replace {
+            image_url,
+            image_public_id,
+        } => (
+            Some(image_url.to_string()),
+            Some(image_public_id.to_string()),
+            existing.image_public_id.clone(),
+        ),
+    };
+
+    if next_name == existing.name
+        && next_image == existing.image
+        && next_image_public_id == existing.image_public_id
+    {
+        tx.commit().await?;
+        let user = get_user_by_id(pool, user_id).await?;
+        return Ok((user, None));
+    }
+
+    let user = sqlx::query_as::<_, User>(
+        r#"UPDATE users
+           SET name = $1,
+               image = $2,
+               image_public_id = $3,
+               updated_at = $4
+           WHERE id = $5
+           RETURNING id, name, email, image, image_public_id, role, is_active, is_verified, created_at, updated_at"#,
+    )
+    .bind(&next_name)
+    .bind(next_image.as_deref())
+    .bind(next_image_public_id.as_deref())
+    .bind(Utc::now())
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    tx.commit().await?;
+
+    Ok((user, previous_image_public_id))
 }
 
 /// Create an email-change verification record and return the plain verification code.
@@ -144,7 +225,7 @@ pub async fn verify_email_change(
         r#"UPDATE users
            SET email = $1, is_verified = TRUE, updated_at = $2
            WHERE id = $3
-           RETURNING id, name, email, image, role, is_active, is_verified, created_at, updated_at"#,
+           RETURNING id, name, email, image, image_public_id, role, is_active, is_verified, created_at, updated_at"#,
     )
     .bind(&record.email)
     .bind(Utc::now())

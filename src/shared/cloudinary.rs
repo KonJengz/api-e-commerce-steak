@@ -6,6 +6,7 @@ use crate::config::AppConfig;
 use crate::shared::errors::AppError;
 
 const PRODUCT_IMAGES_FOLDER: &str = "products";
+const USER_IMAGES_FOLDER: &str = "users";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UploadedImage {
@@ -26,6 +27,39 @@ pub async fn upload_image(
     content_type: &str,
     config: &AppConfig,
 ) -> Result<UploadedImage, AppError> {
+    upload_image_to_folder(
+        PRODUCT_IMAGES_FOLDER,
+        file_name,
+        file_data,
+        content_type,
+        config,
+    )
+    .await
+}
+
+pub async fn upload_user_image(
+    file_name: &str,
+    file_data: Vec<u8>,
+    content_type: &str,
+    config: &AppConfig,
+) -> Result<UploadedImage, AppError> {
+    upload_image_to_folder(
+        USER_IMAGES_FOLDER,
+        file_name,
+        file_data,
+        content_type,
+        config,
+    )
+    .await
+}
+
+async fn upload_image_to_folder(
+    folder: &str,
+    file_name: &str,
+    file_data: Vec<u8>,
+    content_type: &str,
+    config: &AppConfig,
+) -> Result<UploadedImage, AppError> {
     let url = format!(
         "https://api.cloudinary.com/v1_1/{}/image/upload",
         config.cloudinary_cloud_name
@@ -33,7 +67,7 @@ pub async fn upload_image(
 
     let timestamp = chrono::Utc::now().timestamp().to_string();
     let signature = sign_params(
-        &[("folder", PRODUCT_IMAGES_FOLDER), ("timestamp", &timestamp)],
+        &[("folder", folder), ("timestamp", &timestamp)],
         &config.cloudinary_api_secret,
     );
 
@@ -44,7 +78,7 @@ pub async fn upload_image(
 
     let form = multipart::Form::new()
         .part("file", part)
-        .text("folder", PRODUCT_IMAGES_FOLDER.to_string())
+        .text("folder", folder.to_string())
         .text("api_key", config.cloudinary_api_key.clone())
         .text("timestamp", timestamp)
         .text("signature", signature);

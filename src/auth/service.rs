@@ -64,6 +64,12 @@ struct EmailVerificationRecord {
     attempt_count: i32,
 }
 
+struct VerificationSnapshot<'a> {
+    name: Option<&'a str>,
+    image: Option<&'a str>,
+    password_hash: Option<&'a str>,
+}
+
 /// Create email verification record and return verification code
 pub async fn create_email_verification(
     pool: &PgPool,
@@ -149,6 +155,11 @@ pub async fn create_email_verification(
         &email,
         EMAIL_VERIFICATION_PURPOSE_REGISTER,
         Some(user_id),
+        VerificationSnapshot {
+            name: None,
+            image: None,
+            password_hash: None,
+        },
         &code_hash,
         expires_at,
     )
@@ -169,6 +180,102 @@ pub async fn clear_pending_email_verification(pool: &PgPool, email: &str) -> Res
         .await?;
 
     Ok(())
+}
+
+pub async fn resend_email_verification(
+    pool: &PgPool,
+    email: &str,
+    config: &AppConfig,
+) -> Result<String, AppError> {
+    let email = normalize_email(email)?;
+    let now = Utc::now();
+    let mut tx = pool.begin().await?;
+    let existing_user = sqlx::query_as::<_, (Uuid, bool, bool)>(
+        r#"SELECT id, is_active, is_verified
+           FROM users
+           WHERE email = $1
+           FOR UPDATE"#,
+    )
+    .bind(&email)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let (user_id, legacy_name, legacy_image, legacy_password_hash) = match existing_user {
+        Some((user_id, is_active, is_verified)) => {
+            if !is_active {
+                return Err(AppError::Forbidden("Account is suspended".to_string()));
+            }
+
+            if is_verified {
+                return Err(AppError::BadRequest("Email already verified".to_string()));
+            }
+
+            sqlx::query("UPDATE users SET updated_at = $1 WHERE id = $2")
+                .bind(now)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await?;
+
+            (Some(user_id), None, None, None)
+        }
+        None => {
+            let legacy_record = sqlx::query_as::<_, EmailVerificationRecord>(
+                r#"SELECT id, email, name, image, code_hash, password_hash, expires_at, attempt_count
+                   FROM email_verifications
+                   WHERE email = $1 AND purpose = $2 AND user_id IS NULL
+                   ORDER BY created_at DESC
+                   LIMIT 1
+                   FOR UPDATE"#,
+            )
+            .bind(&email)
+            .bind(EMAIL_VERIFICATION_PURPOSE_REGISTER)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| {
+                AppError::BadRequest("No pending verification found for this email".to_string())
+            })?;
+
+            if legacy_record.password_hash.is_none() {
+                return Err(AppError::Internal(
+                    "Missing password hash for legacy pending registration".to_string(),
+                ));
+            }
+
+            (
+                None,
+                legacy_record.name,
+                legacy_record.image,
+                legacy_record.password_hash,
+            )
+        }
+    };
+
+    let code = jwt::generate_verification_code();
+    let code_hash = hash_verification_code(
+        &config.jwt_secret,
+        EMAIL_VERIFICATION_PURPOSE_REGISTER,
+        &email,
+        &code,
+    );
+    let expires_at = Utc::now() + Duration::minutes(EMAIL_VERIFICATION_EXPIRY_MINUTES);
+
+    replace_email_verification(
+        &mut tx,
+        &email,
+        EMAIL_VERIFICATION_PURPOSE_REGISTER,
+        user_id,
+        VerificationSnapshot {
+            name: legacy_name.as_deref(),
+            image: legacy_image.as_deref(),
+            password_hash: legacy_password_hash.as_deref(),
+        },
+        &code_hash,
+        expires_at,
+    )
+    .await?;
+    tx.commit().await?;
+
+    Ok(code)
 }
 
 /// Verify email code, activate the user, and issue tokens.
@@ -367,10 +474,6 @@ pub async fn login(
         return Err(AppError::Forbidden("Account is suspended".to_string()));
     }
 
-    if !is_verified {
-        return Err(AppError::Forbidden("Email not verified".to_string()));
-    }
-
     let password_hash = password_hash.ok_or_else(|| {
         AppError::Unauthorized("Please login with your social account".to_string())
     })?;
@@ -380,6 +483,10 @@ pub async fn login(
         return Err(AppError::Unauthorized(
             "Invalid email or password".to_string(),
         ));
+    }
+
+    if !is_verified {
+        return Err(AppError::Forbidden("Email not verified".to_string()));
     }
 
     let access_token = jwt::create_access_token(
@@ -851,6 +958,7 @@ async fn replace_email_verification(
     email: &str,
     purpose: &str,
     user_id: Option<Uuid>,
+    snapshot: VerificationSnapshot<'_>,
     code_hash: &str,
     expires_at: chrono::DateTime<Utc>,
 ) -> Result<(), AppError> {
@@ -870,12 +978,15 @@ async fn replace_email_verification(
 
     sqlx::query(
         r#"INSERT INTO email_verifications
-           (id, email, code_hash, user_id, purpose, expires_at, attempt_count)
-           VALUES ($1, $2, $3, $4, $5, $6, 0)"#,
+           (id, email, name, image, code_hash, password_hash, user_id, purpose, expires_at, attempt_count)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0)"#,
     )
     .bind(Uuid::now_v7())
     .bind(email)
+    .bind(snapshot.name)
+    .bind(snapshot.image)
     .bind(code_hash)
+    .bind(snapshot.password_hash)
     .bind(user_id)
     .bind(purpose)
     .bind(expires_at)

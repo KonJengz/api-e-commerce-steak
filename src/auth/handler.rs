@@ -58,6 +58,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/register", post(register))
         .route("/verify-email", post(verify_email))
+        .route("/resend-verification", post(resend_verification))
         .route("/login", post(login))
         .route("/google/start", get(google_start))
         .route("/google/callback", get(google_callback))
@@ -357,6 +358,27 @@ async fn verify_email(
     };
 
     Ok((headers, Json(body)))
+}
+
+async fn resend_verification(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<ResendVerificationRequest>,
+) -> Result<Json<MessageResponse>, AppError> {
+    body.validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    let email = body.email.trim();
+    let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
+    apply_ip_and_email_limit(&state, "resend_verification", &client_ip, email, 10, 3).await?;
+
+    let code = service::resend_email_verification(&state.pool, email, &state.config).await?;
+    email::send_verification_email(email, &code, &state.config).await?;
+
+    Ok(Json(MessageResponse {
+        message: "Verification code resent to your email".to_string(),
+    }))
 }
 
 async fn login(

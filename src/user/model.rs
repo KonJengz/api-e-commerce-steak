@@ -10,6 +10,9 @@ pub struct User {
     pub name: String,
     pub email: String,
     pub image: Option<String>,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
+    pub image_public_id: Option<String>,
     pub role: String,
     pub is_active: bool,
     pub is_verified: bool,
@@ -32,15 +35,28 @@ pub struct UserProfileResponse {
 
 impl From<User> for UserProfileResponse {
     fn from(u: User) -> Self {
+        let User {
+            id,
+            name,
+            email,
+            image,
+            image_public_id: _,
+            role,
+            is_active,
+            is_verified,
+            created_at,
+            updated_at: _,
+        } = u;
+
         Self {
-            id: u.id,
-            name: u.name,
-            email: u.email,
-            image: u.image,
-            role: u.role,
-            is_active: u.is_active,
-            is_verified: u.is_verified,
-            created_at: u.created_at,
+            id,
+            name,
+            email,
+            image,
+            role,
+            is_active,
+            is_verified,
+            created_at,
         }
     }
 }
@@ -58,4 +74,14 @@ pub struct VerifyEmailChangeRequest {
     pub email: String,
     #[validate(length(equal = 6, message = "Code must be 6 digits"))]
     pub code: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum ProfileImageUpdate<'a> {
+    Keep,
+    Remove,
+    Replace {
+        image_url: &'a str,
+        image_public_id: &'a str,
+    },
 }

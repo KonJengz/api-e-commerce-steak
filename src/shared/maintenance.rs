@@ -6,6 +6,8 @@ use sqlx::PgPool;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
+const UNVERIFIED_USER_RETENTION_DAYS: i64 = 7;
+
 pub fn spawn_expired_data_cleanup(
     pool: PgPool,
     config: AppConfig,
@@ -25,6 +27,7 @@ pub fn spawn_expired_data_cleanup(
                     if stats.deleted_refresh_tokens > 0
                         || stats.deleted_email_verifications > 0
                         || stats.deleted_oauth_login_tickets > 0
+                        || stats.deleted_unverified_users > 0
                         || stats.deleted_pending_product_images > 0
                         || stats.deleted_pending_product_image_deletions > 0
                     {
@@ -32,6 +35,7 @@ pub fn spawn_expired_data_cleanup(
                             deleted_refresh_tokens = stats.deleted_refresh_tokens,
                             deleted_email_verifications = stats.deleted_email_verifications,
                             deleted_oauth_login_tickets = stats.deleted_oauth_login_tickets,
+                            deleted_unverified_users = stats.deleted_unverified_users,
                             deleted_pending_product_images = stats.deleted_pending_product_images,
                             deleted_pending_product_image_deletions =
                                 stats.deleted_pending_product_image_deletions,
@@ -52,6 +56,7 @@ struct CleanupStats {
     deleted_refresh_tokens: u64,
     deleted_email_verifications: u64,
     deleted_oauth_login_tickets: u64,
+    deleted_unverified_users: u64,
     deleted_pending_product_images: u64,
     deleted_pending_product_image_deletions: u64,
 }
@@ -83,6 +88,15 @@ async fn cleanup_expired_data(
         sqlx::query("DELETE FROM oauth_login_tickets WHERE expires_at <= NOW()")
             .execute(pool)
             .await?;
+
+    let unverified_users = sqlx::query(
+        r#"DELETE FROM users
+           WHERE is_verified = FALSE
+             AND updated_at <= NOW() - ($1 * INTERVAL '1 day')"#,
+    )
+    .bind(UNVERIFIED_USER_RETENTION_DAYS)
+    .execute(pool)
+    .await?;
 
     let expired_images = sqlx::query_as::<_, ExpiredPendingProductImage>(
         r#"SELECT public_id
@@ -151,6 +165,7 @@ async fn cleanup_expired_data(
         deleted_refresh_tokens: refresh_tokens.rows_affected(),
         deleted_email_verifications: email_verifications.rows_affected(),
         deleted_oauth_login_tickets: oauth_login_tickets.rows_affected(),
+        deleted_unverified_users: unverified_users.rows_affected(),
         deleted_pending_product_images,
         deleted_pending_product_image_deletions,
     })

@@ -9,7 +9,7 @@ use super::model::{Address, CreateAddressRequest, UpdateAddressRequest};
 /// List all addresses for a user
 pub async fn list_addresses(pool: &PgPool, user_id: Uuid) -> Result<Vec<Address>, AppError> {
     let addresses = sqlx::query_as::<_, Address>(
-        r#"SELECT id, user_id, recipient_name, phone, address_line, city, postal_code, country, is_default, created_at
+        r#"SELECT id, user_id, recipient_name, phone, address_line, city, postal_code, is_default, created_at
            FROM addresses WHERE user_id = $1 ORDER BY is_default DESC, created_at DESC"#,
     )
     .bind(user_id)
@@ -27,10 +27,6 @@ pub async fn create_address(
 ) -> Result<Address, AppError> {
     let id = Uuid::now_v7();
     let is_default = req.is_default.unwrap_or(false);
-    let country = req
-        .country
-        .clone()
-        .unwrap_or_else(|| "Thailand".to_string());
     let mut tx = pool.begin().await?;
 
     // If this is set as default, unset other defaults
@@ -42,9 +38,9 @@ pub async fn create_address(
     }
 
     let address = sqlx::query_as::<_, Address>(
-        r#"INSERT INTO addresses (id, user_id, recipient_name, phone, address_line, city, postal_code, country, is_default, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-           RETURNING id, user_id, recipient_name, phone, address_line, city, postal_code, country, is_default, created_at"#,
+        r#"INSERT INTO addresses (id, user_id, recipient_name, phone, address_line, city, postal_code, is_default, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           RETURNING id, user_id, recipient_name, phone, address_line, city, postal_code, is_default, created_at"#,
     )
     .bind(id)
     .bind(user_id)
@@ -53,7 +49,6 @@ pub async fn create_address(
     .bind(&req.address_line)
     .bind(&req.city)
     .bind(&req.postal_code)
-    .bind(&country)
     .bind(is_default)
     .bind(Utc::now())
     .fetch_one(&mut *tx)
@@ -75,7 +70,7 @@ pub async fn update_address(
 
     // Verify ownership
     let _existing = sqlx::query_as::<_, Address>(
-        r#"SELECT id, user_id, recipient_name, phone, address_line, city, postal_code, country, is_default, created_at
+        r#"SELECT id, user_id, recipient_name, phone, address_line, city, postal_code, is_default, created_at
            FROM addresses WHERE id = $1 AND user_id = $2
            FOR UPDATE"#,
     )
@@ -101,17 +96,15 @@ pub async fn update_address(
             address_line = COALESCE($3, address_line),
             city = COALESCE($4, city),
             postal_code = COALESCE($5, postal_code),
-            country = COALESCE($6, country),
-            is_default = COALESCE($7, is_default)
-           WHERE id = $8 AND user_id = $9
-           RETURNING id, user_id, recipient_name, phone, address_line, city, postal_code, country, is_default, created_at"#,
+            is_default = COALESCE($6, is_default)
+           WHERE id = $7 AND user_id = $8
+           RETURNING id, user_id, recipient_name, phone, address_line, city, postal_code, is_default, created_at"#,
     )
     .bind(&req.recipient_name)
     .bind(&req.phone)
     .bind(&req.address_line)
     .bind(&req.city)
     .bind(&req.postal_code)
-    .bind(&req.country)
     .bind(req.is_default)
     .bind(address_id)
     .bind(user_id)

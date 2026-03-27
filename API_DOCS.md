@@ -878,6 +878,23 @@ _(refresh_token ใหม่จะถูกส่งผ่าน `Set-Cookie` he
 
 **Headers:** `Authorization: Bearer <access_token>`
 
+**Response 200:**
+
+```json
+[
+  {
+    "id": "0195dd2a-9b4c-7c8d-b4ab-629f8ff53e59",
+    "recipient_name": "John Doe",
+    "phone": "0812345678",
+    "address_line": "123/4 ถนนสุขุมวิท",
+    "city": "กรุงเทพ",
+    "postal_code": "10110",
+    "is_default": true,
+    "created_at": "2024-03-27T10:30:00Z"
+  }
+]
+```
+
 ---
 
 ### POST `/api/addresses`
@@ -895,10 +912,26 @@ _(refresh_token ใหม่จะถูกส่งผ่าน `Set-Cookie` he
   "address_line": "123/4 ถนนสุขุมวิท",
   "city": "กรุงเทพ",
   "postal_code": "10110",
-  "country": "Thailand",
   "is_default": true
 }
 ```
+
+**Response 201:**
+
+```json
+{
+  "id": "0195dd2a-9b4c-7c8d-b4ab-629f8ff53e59",
+  "recipient_name": "John Doe",
+  "phone": "0812345678",
+  "address_line": "123/4 ถนนสุขุมวิท",
+  "city": "กรุงเทพ",
+  "postal_code": "10110",
+  "is_default": true,
+  "created_at": "2024-03-27T10:30:00Z"
+}
+```
+
+**หมายเหตุ:** ระบบนี้รองรับเฉพาะที่อยู่ในประเทศไทย ดังนั้น request/response ของ address จะไม่มี field `country`
 
 ---
 
@@ -917,6 +950,21 @@ _(refresh_token ใหม่จะถูกส่งผ่าน `Set-Cookie` he
 }
 ```
 
+**Response 200:**
+
+```json
+{
+  "id": "0195dd2a-9b4c-7c8d-b4ab-629f8ff53e59",
+  "recipient_name": "Jane Doe",
+  "phone": "0812345678",
+  "address_line": "123/4 ถนนสุขุมวิท",
+  "city": "กรุงเทพ",
+  "postal_code": "10110",
+  "is_default": true,
+  "created_at": "2024-03-27T10:30:00Z"
+}
+```
+
 ---
 
 ### DELETE `/api/addresses/{id}`
@@ -924,6 +972,14 @@ _(refresh_token ใหม่จะถูกส่งผ่าน `Set-Cookie` he
 ลบที่อยู่
 
 **Headers:** `Authorization: Bearer <access_token>`
+
+**Response 200:**
+
+```json
+{
+  "message": "Address deleted successfully"
+}
+```
 
 ---
 
@@ -1281,6 +1337,32 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
 }
 ```
 
+**Response 200:** (Updated Cart)
+
+```json
+{
+  "id": "cart-uuid",
+  "user_id": "user-uuid",
+  "total_amount": "39900.00",
+  "items": [
+    {
+      "id": "cart-item-uuid",
+      "product_id": "product-uuid",
+      "product_name": "iPhone 16",
+      "product_image_url": "https://res.cloudinary.com/...",
+      "current_price": "39900.00",
+      "stock": 10,
+      "is_active": true,
+      "quantity": 1,
+      "created_at": "2026-03-25T00:00:00Z",
+      "updated_at": "2026-03-25T00:00:00Z"
+    }
+  ],
+  "created_at": "2026-03-25T00:00:00Z",
+  "updated_at": "2026-03-25T00:00:00Z"
+}
+```
+
 **หมายเหตุ:**
 
 - สินค้าต้อง active อยู่
@@ -1329,11 +1411,50 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
 - ถ้า product inactive หรือไม่มีอยู่จริง ระบบจะตอบ `404`
 - ถ้า product มี stock ไม่พอ ระบบจะตอบ `400`
 
+**Response 200:** (Updated Cart)
+
+```json
+{
+  "id": "cart-uuid",
+  "user_id": "user-uuid",
+  "total_amount": "119700.00",
+  "items": [
+    {
+      "id": "cart-item-uuid",
+      "product_id": "product-uuid",
+      "product_name": "iPhone 16",
+      "product_image_url": "https://res.cloudinary.com/...",
+      "current_price": "39900.00",
+      "stock": 10,
+      "is_active": true,
+      "quantity": 3,
+      "created_at": "2026-03-25T00:00:00Z",
+      "updated_at": "2026-03-25T00:00:00Z"
+    }
+  ],
+  "created_at": "2026-03-25T00:00:00Z",
+  "updated_at": "2026-03-25T00:00:00Z"
+}
+```
+
 ### DELETE `/api/carts/items/{product_id}`
 
 ลบสินค้าชิ้นเดียวออกจากตะกร้า
 
 **Headers:** `Authorization: Bearer <access_token>`
+
+**Response 200:** (Updated Cart)
+
+```json
+{
+  "id": "cart-uuid",
+  "user_id": "user-uuid",
+  "total_amount": "0.00",
+  "items": [],
+  "created_at": "2026-03-25T00:00:00Z",
+  "updated_at": "2026-03-25T00:00:00Z"
+}
+```
 
 ### DELETE `/api/carts`
 
@@ -1357,57 +1478,48 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
 {
   "shipping_address_id": "address-uuid",
   "items": [
-    { "product_id": "product-uuid-1", "quantity": 2 },
-    { "product_id": "product-uuid-2", "quantity": 1 }
+    {
+      "product_id": "product-uuid",
+      "quantity": 2
+    }
   ]
 }
 ```
 
-**Response 200:**
+**Response 201:**
 
 ```json
 {
   "id": "order-uuid",
   "user_id": "user-uuid",
   "shipping_address_id": "address-uuid",
-  "total_amount": 119700.0,
+  "total_amount": "79800.00",
   "status": "PENDING",
-  "created_at": "2026-03-25T00:00:00Z",
+  "created_at": "2026-03-27T10:30:00Z",
   "items": [
     {
-      "id": "item-uuid",
+      "id": "order-item-uuid",
       "order_id": "order-uuid",
-      "product_id": "product-uuid-1",
+      "product_id": "product-uuid",
       "product_name_at_purchase": "iPhone 16",
       "quantity": 2,
-      "price_at_purchase": 39900.0
+      "price_at_purchase": "39900.00"
     }
   ]
 }
 ```
 
+---
+
 ### GET `/api/orders`
 
-ดู orders ของตัวเอง
+ดูรายการสั่งซื้อของตัวเอง (เรียงจากใหม่ไปเก่า)
 
 **Headers:** `Authorization: Bearer <access_token>`
 
-**Query Parameters (Optional):**
-
-- `page` (number): หน้าที่ต้องการ เริ่มที่ 1 (default: 1)
-- `limit` (number): จำนวนรายการต่อหน้า (default: 20, max: 100)
-
-**ตัวอย่าง Request:**
-
-```http
-GET /api/orders?page=1&limit=20
-```
-
-**หมายเหตุ:**
-
-- ถ้าไม่ส่ง query มาเลย ระบบจะใช้ `page=1` และ `limit=20`
-- ถ้า `page < 1` ระบบจะปรับเป็น `1`
-- ถ้า `limit > 100` ระบบจะปรับลงเป็น `100`
+**Query Parameters:**
+- `page` (number): default 1
+- `limit` (number): default 20
 
 **Response 200:**
 
@@ -1416,19 +1528,48 @@ GET /api/orders?page=1&limit=20
   "data": [
     {
       "id": "order-uuid",
-      "total_amount": "119700.00",
-      "status": "PENDING"
+      "user_id": "user-uuid",
+      "shipping_address_id": "address-uuid",
+      "total_amount": "79800.00",
+      "status": "PENDING",
+      "created_at": "2026-03-27T10:30:00Z"
     }
   ],
-  "total": 15,
+  "total": 1,
   "page": 1,
   "limit": 20,
   "total_pages": 1
 }
 ```
 
+---
+
 ### GET `/api/orders/{id}`
 
-ดูรายละเอียด order พร้อม items
+ดูรายละเอียด order รายการเดียว
 
 **Headers:** `Authorization: Bearer <access_token>`
+
+**Response 200:**
+
+```json
+{
+  "id": "order-uuid",
+  "user_id": "user-uuid",
+  "shipping_address_id": "address-uuid",
+  "total_amount": "79800.00",
+  "status": "PENDING",
+  "created_at": "2026-03-27T10:30:00Z",
+  "items": [
+    {
+      "id": "order-item-uuid",
+      "order_id": "order-uuid",
+      "product_id": "product-uuid",
+      "product_name_at_purchase": "iPhone 16",
+      "quantity": 2,
+      "price_at_purchase": "39900.00"
+    }
+  ]
+}
+```
+

@@ -12,7 +12,6 @@ pub struct Address {
     pub address_line: String,
     pub city: String,
     pub postal_code: String,
-    pub country: String,
     pub is_default: bool,
     pub created_at: DateTime<Utc>,
 }
@@ -28,7 +27,6 @@ pub struct CreateAddressRequest {
     pub city: String,
     #[validate(length(min = 1, message = "Postal code is required"))]
     pub postal_code: String,
-    pub country: Option<String>,
     pub is_default: Option<bool>,
 }
 
@@ -39,6 +37,5 @@ pub struct UpdateAddressRequest {
     pub address_line: Option<String>,
     pub city: Option<String>,
     pub postal_code: Option<String>,
-    pub country: Option<String>,
     pub is_default: Option<bool>,
 }

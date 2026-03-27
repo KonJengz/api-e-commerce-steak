@@ -1140,7 +1140,9 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
 
 **Headers:** `Authorization: Bearer <access_token>` (ADMIN only)
 
-**หมายเหตุ:** ถ้าจะส่งรูปหลักตอนสร้าง product ต้องใช้ค่าที่ได้จาก `/api/products/upload-image` ของ admin คนเดียวกัน และต้องส่ง `image_url` กับ `image_public_id` มาด้วยกัน
+**หมายเหตุ:** 
+- ถ้าจะส่งรูปหลักตอนสร้าง product ต้องใช้ค่าที่ได้จาก `/api/products/upload-image` ของ admin คนเดียวกัน และต้องส่ง `image_url` กับ `image_public_id` มาด้วยกัน
+- 1 product สามารถมีรูปได้สูงสุด **4 รูป** (รวมรูปหลักและรูปใน gallery)
 
 **Request Body:**
 
@@ -1183,7 +1185,10 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
 
 **Headers:** `Authorization: Bearer <access_token>` (ADMIN only)
 
-**หมายเหตุ:** ต้องใช้ค่าที่ได้จาก `/api/products/upload-image` ของ admin คนเดียวกันก่อนเสมอ ถ้า `is_primary = true` รูปนี้จะกลายเป็นรูปหลักใหม่ แต่รูปหลักเดิมจะยังอยู่ใน gallery
+**หมายเหตุ:** 
+- ต้องใช้ค่าที่ได้จาก `/api/products/upload-image` ของ admin คนเดียวกันก่อนเสมอ
+- ถ้า `is_primary = true` รูปนี้จะกลายเป็นรูปหลักใหม่ แต่รูปหลักเดิมจะยังอยู่ใน gallery
+- 1 product สามารถมีรูปได้สูงสุด **4 รูป** (หากครบแล้วจะเพิ่มไม่ได้อีกจนกว่าจะลบรูปเก่าออก)
 
 **Request Body:**
 

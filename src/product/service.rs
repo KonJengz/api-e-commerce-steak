@@ -11,6 +11,7 @@ use super::model::{
     AttachProductImageRequest, CreateProductRequest, Product, ProductFilterQuery, ProductImage,
     ProductImageMutationResponse, ReorderProductImagesRequest, UpdateProductRequest,
 };
+const MAX_PRODUCT_IMAGES: usize = 4;
 
 /// List all active products with filters
 pub async fn list_products(
@@ -327,6 +328,13 @@ pub async fn attach_product_image(
     .await?;
 
     let current_images = fetch_product_images(&mut *tx, product_id).await?;
+    if current_images.len() >= MAX_PRODUCT_IMAGES {
+        return Err(AppError::BadRequest(format!(
+            "Maximum of {} images allowed per product",
+            MAX_PRODUCT_IMAGES
+        )));
+    }
+
     let new_image_id = Uuid::now_v7();
     let should_be_primary = req.is_primary.unwrap_or(current_images.is_empty());
 

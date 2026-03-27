@@ -5,7 +5,7 @@ use axum::{
     Json, Router,
     extract::{ConnectInfo, Query, State},
     http::header::{HeaderMap, SET_COOKIE},
-    response::{IntoResponse, Redirect},
+    response::{IntoResponse, Redirect, Response},
     routing::{get, post},
 };
 use axum_extra::extract::{
@@ -1348,7 +1348,7 @@ async fn refresh_token(
     headers: HeaderMap,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     jar: CookieJar,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<Response, AppError> {
     let client_ip = client_ip(&headers, addr, state.config.trust_proxy_headers);
     apply_ip_limit(&state, "refresh", &client_ip, 30).await?;
 
@@ -1357,7 +1357,19 @@ async fn refresh_token(
         .map(|c| c.value().to_string())
         .ok_or_else(|| AppError::Unauthorized("No refresh token cookie".to_string()))?;
 
-    let tokens = service::rotate_refresh_token(&state.pool, &old_token, &state.config).await?;
+    let tokens = match service::rotate_refresh_token(&state.pool, &old_token, &state.config).await {
+        Ok(tokens) => tokens,
+        Err(AppError::Unauthorized(message)) => {
+            let clear_cookie = build_clear_refresh_cookie(state.config.cookie_secure);
+            let mut response = AppError::Unauthorized(message).into_response();
+            response
+                .headers_mut()
+                .insert(SET_COOKIE, clear_cookie.parse().unwrap());
+            return Ok(response);
+        }
+        Err(err) => return Err(err),
+    };
+
     let cookie = build_refresh_cookie(
         &tokens.refresh_token,
         state.config.jwt_refresh_expiry_days,
@@ -1371,7 +1383,7 @@ async fn refresh_token(
         user: tokens.user,
     };
 
-    Ok((headers, Json(body)))
+    Ok((headers, Json(body)).into_response())
 }
 
 async fn logout(

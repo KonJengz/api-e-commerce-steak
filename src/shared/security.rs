@@ -82,6 +82,12 @@ pub fn hash_refresh_token(secret: &str, token: &str) -> String {
     hash_segments(secret, &["refresh_token", token])
 }
 
+pub fn build_refresh_session_token(secret: &str, token_id: Uuid) -> String {
+    let token_id = token_id.to_string();
+    let signature = hash_segments(secret, &["refresh_session_token", &token_id]);
+    format!("{}.{}", token_id, signature)
+}
+
 pub fn hash_oauth_login_ticket(secret: &str, token: &str) -> String {
     hash_segments(secret, &["oauth_login_ticket", token])
 }
@@ -181,6 +187,21 @@ mod tests {
         let first = hash_refresh_token("secret", "token");
         let second = hash_refresh_token("secret", "token");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn build_refresh_session_token_is_deterministic_for_the_same_id() {
+        let token_id = Uuid::now_v7();
+        let first = build_refresh_session_token("secret", token_id);
+        let second = build_refresh_session_token("secret", token_id);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn build_refresh_session_token_changes_with_the_id() {
+        let first = build_refresh_session_token("secret", Uuid::now_v7());
+        let second = build_refresh_session_token("secret", Uuid::now_v7());
+        assert_ne!(first, second);
     }
 
     #[test]

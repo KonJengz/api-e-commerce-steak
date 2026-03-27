@@ -9,8 +9,9 @@ use crate::shared::jwt;
 use crate::shared::password;
 use crate::shared::security::{
     EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET, EMAIL_VERIFICATION_PURPOSE_REGISTER,
-    coerce_oauth_user_name, fallback_user_name, hash_oauth_login_ticket, hash_refresh_token,
-    hash_verification_code, normalize_email, normalize_optional_image, normalize_required_name,
+    build_refresh_session_token, coerce_oauth_user_name, fallback_user_name,
+    hash_oauth_login_ticket, hash_refresh_token, hash_verification_code, normalize_email,
+    normalize_optional_image, normalize_required_name,
 };
 
 use super::model::{AuthTokens, UserInfo};
@@ -18,6 +19,7 @@ use super::model::{AuthTokens, UserInfo};
 const EMAIL_VERIFICATION_EXPIRY_MINUTES: i64 = 15;
 const MAX_EMAIL_VERIFICATION_ATTEMPTS: i32 = 5;
 const OAUTH_LOGIN_TICKET_EXPIRY_MINUTES: i64 = 5;
+const REFRESH_TOKEN_IDEMPOTENT_WINDOW_SECONDS: i64 = 5;
 const GOOGLE_PROVIDER_NAME: &str = "google";
 const GITHUB_PROVIDER_NAME: &str = "github";
 const SOCIAL_ACCOUNT_EXISTS_MESSAGE: &str = "An account with this email already exists. Please sign in with your existing method to continue.";
@@ -93,6 +95,22 @@ struct SocialUserRecord {
     role: String,
     is_active: bool,
     is_verified: bool,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct RefreshTokenRecord {
+    id: Uuid,
+    user_id: Uuid,
+    family_id: Uuid,
+    replaced_by_token_id: Option<Uuid>,
+    expires_at: chrono::DateTime<Utc>,
+    consumed_at: Option<chrono::DateTime<Utc>>,
+    revoked_at: Option<chrono::DateTime<Utc>>,
+}
+
+struct IssuedRefreshToken {
+    id: Uuid,
+    token: String,
 }
 
 struct SocialIdentity {
@@ -1438,7 +1456,7 @@ pub async fn exchange_oauth_login_ticket(
     issue_tokens_for_user(pool, user, config).await
 }
 
-/// Rotate refresh token: validate old one, delete it, create new one
+/// Rotate refresh token while preserving family lineage and tolerating a tiny concurrent replay window.
 pub async fn rotate_refresh_token(
     pool: &PgPool,
     old_token: &str,
@@ -1447,55 +1465,117 @@ pub async fn rotate_refresh_token(
     let old_token_hash = hash_refresh_token(&config.jwt_secret, old_token);
     let mut tx = pool.begin().await?;
 
-    let record = sqlx::query_as::<_, (Uuid, chrono::DateTime<Utc>)>(
-        r#"DELETE FROM refresh_tokens
+    let record = sqlx::query_as::<_, RefreshTokenRecord>(
+        r#"SELECT id, user_id, family_id, replaced_by_token_id, expires_at, consumed_at, revoked_at
+           FROM refresh_tokens
            WHERE token_hash = $1
-           RETURNING user_id, expires_at"#,
+           FOR UPDATE"#,
     )
     .bind(&old_token_hash)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| AppError::Unauthorized("Invalid refresh token".to_string()))?;
 
-    let (user_id, expires_at) = record;
+    let now = Utc::now();
 
-    if Utc::now() > expires_at {
+    if record.revoked_at.is_some() {
+        tx.commit().await?;
+        return Err(AppError::Unauthorized(
+            "Refresh session has been revoked. Please login again.".to_string(),
+        ));
+    }
+
+    if now > record.expires_at {
         tx.commit().await?;
         return Err(AppError::Unauthorized(
             "Refresh token has expired".to_string(),
         ));
     }
 
-    let user = sqlx::query_as::<_, (Uuid, String, String, Option<String>, String)>(
-        "SELECT id, name, email, image, role FROM users WHERE id = $1 AND is_active = TRUE",
-    )
-    .bind(user_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(|| AppError::Unauthorized("User not found or inactive".to_string()))?;
+    if let Some(consumed_at) = record.consumed_at {
+        let Some(successor_id) = record.replaced_by_token_id else {
+            revoke_refresh_token_family(&mut tx, record.family_id, now).await?;
+            tx.commit().await?;
+            return Err(AppError::Unauthorized(
+                "Refresh token reuse detected. Please login again.".to_string(),
+            ));
+        };
 
-    let (uid, name, email, image, role) = user;
+        let successor = sqlx::query_as::<_, RefreshTokenRecord>(
+            r#"SELECT id, user_id, family_id, replaced_by_token_id, expires_at, consumed_at, revoked_at
+               FROM refresh_tokens
+               WHERE id = $1
+               FOR UPDATE"#,
+        )
+        .bind(successor_id)
+        .fetch_optional(&mut *tx)
+        .await?;
 
+        let within_idempotent_window =
+            now <= consumed_at + Duration::seconds(REFRESH_TOKEN_IDEMPOTENT_WINDOW_SECONDS);
+        let successor_is_reusable = successor.as_ref().is_some_and(|token| {
+            token.revoked_at.is_none() && token.consumed_at.is_none() && now <= token.expires_at
+        });
+
+        if within_idempotent_window && successor_is_reusable {
+            let user = load_active_auth_user(&mut tx, record.user_id).await?;
+            let access_token = jwt::create_access_token(
+                user.id,
+                &user.role,
+                &config.jwt_secret,
+                config.jwt_access_expiry_minutes,
+            )?;
+
+            tx.commit().await?;
+
+            return Ok(AuthTokens {
+                access_token,
+                refresh_token: build_refresh_session_token(&config.jwt_secret, successor_id),
+                user: user.into(),
+            });
+        }
+
+        revoke_refresh_token_family(&mut tx, record.family_id, now).await?;
+        tx.commit().await?;
+
+        return Err(AppError::Unauthorized(
+            "Refresh token reuse detected. Please login again.".to_string(),
+        ));
+    }
+
+    let user = load_active_auth_user(&mut tx, record.user_id).await?;
     let access_token = jwt::create_access_token(
-        uid,
-        &role,
+        user.id,
+        &user.role,
         &config.jwt_secret,
         config.jwt_access_expiry_minutes,
     )?;
-    let new_refresh_token = create_refresh_token_in_tx(&mut tx, uid, config).await?;
+    let new_refresh_token = create_refresh_token_in_tx(
+        &mut tx,
+        user.id,
+        Some(record.family_id),
+        Some(record.id),
+        config,
+    )
+    .await?;
+
+    sqlx::query(
+        r#"UPDATE refresh_tokens
+           SET consumed_at = $1, replaced_by_token_id = $2
+           WHERE id = $3"#,
+    )
+    .bind(now)
+    .bind(new_refresh_token.id)
+    .bind(record.id)
+    .execute(&mut *tx)
+    .await?;
 
     tx.commit().await?;
 
     Ok(AuthTokens {
         access_token,
-        refresh_token: new_refresh_token,
-        user: UserInfo {
-            id: uid,
-            name,
-            email,
-            image,
-            role,
-        },
+        refresh_token: new_refresh_token.token,
+        user: user.into(),
     })
 }
 
@@ -1646,6 +1726,39 @@ async fn delete_refresh_tokens_for_user_in_tx(
     Ok(())
 }
 
+async fn load_active_auth_user(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+) -> Result<AuthUserRecord, AppError> {
+    sqlx::query_as::<_, AuthUserRecord>(
+        r#"SELECT id, name, email, image, role
+           FROM users
+           WHERE id = $1 AND is_active = TRUE"#,
+    )
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::Unauthorized("User not found or inactive".to_string()))
+}
+
+async fn revoke_refresh_token_family(
+    tx: &mut Transaction<'_, Postgres>,
+    family_id: Uuid,
+    revoked_at: chrono::DateTime<Utc>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"UPDATE refresh_tokens
+           SET revoked_at = COALESCE(revoked_at, $2)
+           WHERE family_id = $1"#,
+    )
+    .bind(family_id)
+    .bind(revoked_at)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
 async fn ensure_password_is_new(
     existing_password_hash: Option<&str>,
     next_password: &str,
@@ -1675,50 +1788,80 @@ async fn create_refresh_token(
     user_id: Uuid,
     config: &AppConfig,
 ) -> Result<String, AppError> {
-    let (id, token, token_hash, expires_at) = build_refresh_token_record(config);
+    let issued_token = build_refresh_token_record(config, None, None);
 
     sqlx::query(
-        r#"INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at)
-           VALUES ($1, $2, $3, $4)"#,
+        r#"INSERT INTO refresh_tokens (id, user_id, family_id, parent_token_id, token_hash, expires_at)
+           VALUES ($1, $2, $3, $4, $5, $6)"#,
     )
-    .bind(id)
+    .bind(issued_token.id)
     .bind(user_id)
-    .bind(token_hash)
-    .bind(expires_at)
+    .bind(issued_token.family_id)
+    .bind(issued_token.parent_token_id)
+    .bind(issued_token.token_hash)
+    .bind(issued_token.expires_at)
     .execute(pool)
     .await?;
 
-    Ok(token)
+    Ok(issued_token.token)
 }
 
 async fn create_refresh_token_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
+    family_id: Option<Uuid>,
+    parent_token_id: Option<Uuid>,
     config: &AppConfig,
-) -> Result<String, AppError> {
-    let (id, token, token_hash, expires_at) = build_refresh_token_record(config);
+) -> Result<IssuedRefreshToken, AppError> {
+    let issued_token = build_refresh_token_record(config, family_id, parent_token_id);
 
     sqlx::query(
-        r#"INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at)
-           VALUES ($1, $2, $3, $4)"#,
+        r#"INSERT INTO refresh_tokens (id, user_id, family_id, parent_token_id, token_hash, expires_at)
+           VALUES ($1, $2, $3, $4, $5, $6)"#,
     )
-    .bind(id)
+    .bind(issued_token.id)
     .bind(user_id)
-    .bind(token_hash)
-    .bind(expires_at)
+    .bind(issued_token.family_id)
+    .bind(issued_token.parent_token_id)
+    .bind(issued_token.token_hash)
+    .bind(issued_token.expires_at)
     .execute(&mut **tx)
     .await?;
 
-    Ok(token)
+    Ok(IssuedRefreshToken {
+        id: issued_token.id,
+        token: issued_token.token,
+    })
 }
 
-fn build_refresh_token_record(config: &AppConfig) -> (Uuid, String, String, chrono::DateTime<Utc>) {
+struct RefreshTokenInsert {
+    id: Uuid,
+    family_id: Uuid,
+    parent_token_id: Option<Uuid>,
+    token: String,
+    token_hash: String,
+    expires_at: chrono::DateTime<Utc>,
+}
+
+fn build_refresh_token_record(
+    config: &AppConfig,
+    family_id: Option<Uuid>,
+    parent_token_id: Option<Uuid>,
+) -> RefreshTokenInsert {
     let id = Uuid::now_v7();
-    let token = jwt::create_refresh_token();
+    let family_id = family_id.unwrap_or(id);
+    let token = build_refresh_session_token(&config.jwt_secret, id);
     let token_hash = hash_refresh_token(&config.jwt_secret, &token);
     let expires_at = Utc::now() + Duration::days(config.jwt_refresh_expiry_days);
 
-    (id, token, token_hash, expires_at)
+    RefreshTokenInsert {
+        id,
+        family_id,
+        parent_token_id,
+        token,
+        token_hash,
+        expires_at,
+    }
 }
 
 async fn exchange_google_authorization_code(

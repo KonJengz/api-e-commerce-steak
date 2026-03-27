@@ -34,7 +34,7 @@ struct ExistingProfileState {
 /// Get user by ID
 pub async fn get_user_by_id(pool: &PgPool, user_id: Uuid) -> Result<User, AppError> {
     let user = sqlx::query_as::<_, User>(
-        r#"SELECT id, name, email, image, image_public_id, role, is_active, is_verified, created_at, updated_at
+        r#"SELECT id, name, email, image, image_public_id, role, is_active, is_verified, password_hash, created_at, updated_at
            FROM users WHERE id = $1"#,
     )
     .bind(user_id)
@@ -102,7 +102,7 @@ pub async fn update_profile(
                image_public_id = $3,
                updated_at = $4
            WHERE id = $5
-           RETURNING id, name, email, image, image_public_id, role, is_active, is_verified, created_at, updated_at"#,
+           RETURNING id, name, email, image, image_public_id, role, is_active, is_verified, password_hash, created_at, updated_at"#,
     )
     .bind(&next_name)
     .bind(next_image.as_deref())
@@ -225,7 +225,7 @@ pub async fn verify_email_change(
         r#"UPDATE users
            SET email = $1, is_verified = TRUE, updated_at = $2
            WHERE id = $3
-           RETURNING id, name, email, image, image_public_id, role, is_active, is_verified, created_at, updated_at"#,
+           RETURNING id, name, email, image, image_public_id, role, is_active, is_verified, password_hash, created_at, updated_at"#,
     )
     .bind(&record.email)
     .bind(Utc::now())

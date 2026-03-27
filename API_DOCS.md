@@ -699,6 +699,7 @@ _(refresh_token ใหม่จะถูกส่งผ่าน `Set-Cookie` he
   "role": "USER",
   "is_active": true,
   "is_verified": true,
+  "has_password": true,
   "created_at": "2026-03-25T00:00:00Z"
 }
 ```
@@ -736,6 +737,7 @@ _(refresh_token ใหม่จะถูกส่งผ่าน `Set-Cookie` he
   "role": "USER",
   "is_active": true,
   "is_verified": true,
+  "has_password": true,
   "created_at": "2026-03-25T00:00:00Z"
 }
 ```
@@ -878,6 +880,7 @@ _(refresh_token ใหม่จะถูกส่งผ่าน `Set-Cookie` he
   "role": "USER",
   "is_active": true,
   "is_verified": true,
+  "has_password": true,
   "created_at": "2026-03-25T00:00:00Z"
 }
 ```

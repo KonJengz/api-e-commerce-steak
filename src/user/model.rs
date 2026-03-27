@@ -16,6 +16,7 @@ pub struct User {
     pub role: String,
     pub is_active: bool,
     pub is_verified: bool,
+    pub password_hash: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -30,6 +31,7 @@ pub struct UserProfileResponse {
     pub role: String,
     pub is_active: bool,
     pub is_verified: bool,
+    pub has_password: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -44,6 +46,7 @@ impl From<User> for UserProfileResponse {
             role,
             is_active,
             is_verified,
+            password_hash: _,
             created_at,
             updated_at: _,
         } = u;
@@ -56,6 +59,7 @@ impl From<User> for UserProfileResponse {
             role,
             is_active,
             is_verified,
+            has_password: u.password_hash.is_some(),
             created_at,
         }
     }

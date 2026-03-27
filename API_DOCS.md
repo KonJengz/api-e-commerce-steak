@@ -27,6 +27,13 @@ Base URLs:
 - backend ใช้ refresh token rotation แบบ token family และรองรับ concurrent refresh ซ้ำ token เดิมแบบ idempotent ภายในหน้าต่างสั้น ๆ ประมาณ 5 วินาทีเท่านั้น
 - frontend ยังควรทำ `single-flight refresh` เอง และ retry original request ได้แค่ 1 รอบหลัง refresh สำเร็จ
 
+**Security & Role Validation:**
+
+- ระบบ Backend จะทำการตรวจสอบ **Role** และ **Account Status (is_active)** จาก Database โดยตรงทุกครั้งที่มีการเรียกใช้ request (Real-time Verification)
+- แม้ว่าใน JWT จะมี Claim `role` อยู่ แต่ Backend จะยึดข้อมูลจาก Database เป็นหลักเสมอเพื่อความปลอดภัยสูงสุด
+- หาก User ถูกระงับการใช้งาน (Banned) หรือถูกเปลี่ยน Role (เช่น จาก Admin เป็น User) จะมีผลทันทีใน request ถัดไป โดยไม่ต้องรอให้ Token หมดอายุ
+- Frontend สามารถใช้ข้อมูลจาก `GET /api/users/me` เป็นหลักในการตัดสินใจแสดงผล UI ตามสิทธิ์ (Role) และสถานะการตั้งรหัสผ่าน (`has_password`) ของผู้ใช้
+
 **Recommended Frontend Auth Flow:**
 
 1. สมัครด้วย `POST /api/auth/register`

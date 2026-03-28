@@ -604,6 +604,11 @@ async fn apply_product_image_order(
 ) -> Result<(), AppError> {
     let effective_primary_image_id = primary_image_id.or_else(|| ordered_ids.first().copied());
 
+    sqlx::query("UPDATE product_images SET is_primary = FALSE WHERE product_id = $1")
+        .bind(product_id)
+        .execute(&mut **tx)
+        .await?;
+
     for (index, image_id) in ordered_ids.iter().enumerate() {
         let result = sqlx::query(
             r#"UPDATE product_images

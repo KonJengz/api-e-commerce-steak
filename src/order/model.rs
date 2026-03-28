@@ -13,7 +13,9 @@ pub struct Order {
     pub shipping_address_id: Option<Uuid>,
     pub total_amount: Decimal,
     pub status: String,
+    pub tracking_number: Option<String>,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -41,6 +43,20 @@ pub struct OrderItemRequest {
     pub quantity: i32,
 }
 
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct AdminOrder {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub user_name: String,
+    pub user_email: String,
+    pub shipping_address_id: Option<Uuid>,
+    pub total_amount: Decimal,
+    pub status: String,
+    pub tracking_number: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 // ─── Response DTOs ──────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
@@ -50,6 +66,35 @@ pub struct OrderResponse {
     pub shipping_address_id: Option<Uuid>,
     pub total_amount: Decimal,
     pub status: String,
+    pub tracking_number: Option<String>,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
     pub items: Vec<OrderItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminOrderResponse {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub user_name: String,
+    pub user_email: String,
+    pub shipping_address_id: Option<Uuid>,
+    pub total_amount: Decimal,
+    pub status: String,
+    pub tracking_number: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub items: Vec<OrderItem>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Validate)]
+pub struct UpdateOrderRequest {
+    #[validate(length(
+        min = 1,
+        max = 50,
+        message = "Order status is required and must be at most 50 characters."
+    ))]
+    pub status: String,
+    #[validate(length(max = 100, message = "Tracking number must be at most 100 characters."))]
+    pub tracking_number: Option<String>,
 }

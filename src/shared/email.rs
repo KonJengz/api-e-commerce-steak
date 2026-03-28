@@ -100,6 +100,31 @@ pub async fn send_order_confirmation(
     send_email(to, &subject, &body, config).await
 }
 
+/// Send a tracking notification email when an order ships or its tracking changes.
+pub async fn send_order_tracking_email(
+    to: &str,
+    order_id: &str,
+    tracking_number: &str,
+    config: &AppConfig,
+) -> Result<(), AppError> {
+    let subject = format!("Tracking Update - Order #{}", order_id);
+    let body = format!(
+        r#"<html>
+<body style="font-family: Arial, sans-serif; padding: 20px; line-height: 1.6;">
+    <h2 style="color: #0f172a;">Your order is on the way</h2>
+    <p>Your order <strong>#{}</strong> now has a tracking number.</p>
+    <div style="background: #f8fafc; padding: 15px; border-radius: 8px; margin: 20px 0;">
+        <p style="margin: 0;">Tracking number: <strong style="font-size: 18px; color: #0f172a;">{}</strong></p>
+    </div>
+    <p>Please keep this number for delivery updates.</p>
+</body>
+</html>"#,
+        order_id, tracking_number
+    );
+
+    send_email(to, &subject, &body, config).await
+}
+
 /// Internal helper to send an email via Resend API
 async fn send_email(
     to: &str,

@@ -108,11 +108,6 @@ struct RefreshTokenRecord {
     revoked_at: Option<chrono::DateTime<Utc>>,
 }
 
-struct IssuedRefreshToken {
-    id: Uuid,
-    token: String,
-}
-
 struct SocialIdentity {
     provider_name: &'static str,
     provider_label: &'static str,
@@ -1550,21 +1545,37 @@ pub async fn rotate_refresh_token(
         &config.jwt_secret,
         config.jwt_access_expiry_minutes,
     )?;
-    let new_refresh_token = create_refresh_token_in_tx(
-        &mut tx,
-        user.id,
-        Some(record.family_id),
-        Some(record.id),
-        config,
+    let new_refresh_token =
+        build_refresh_token_record(config, Some(record.family_id), Some(record.id));
+
+    sqlx::query(
+        r#"UPDATE refresh_tokens
+           SET consumed_at = $1
+           WHERE id = $2"#,
     )
+    .bind(now)
+    .bind(record.id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"INSERT INTO refresh_tokens (id, user_id, family_id, parent_token_id, token_hash, expires_at)
+           VALUES ($1, $2, $3, $4, $5, $6)"#,
+    )
+    .bind(new_refresh_token.id)
+    .bind(user.id)
+    .bind(new_refresh_token.family_id)
+    .bind(new_refresh_token.parent_token_id)
+    .bind(new_refresh_token.token_hash)
+    .bind(new_refresh_token.expires_at)
+    .execute(&mut *tx)
     .await?;
 
     sqlx::query(
         r#"UPDATE refresh_tokens
-           SET consumed_at = $1, replaced_by_token_id = $2
-           WHERE id = $3"#,
+           SET replaced_by_token_id = $1
+           WHERE id = $2"#,
     )
-    .bind(now)
     .bind(new_refresh_token.id)
     .bind(record.id)
     .execute(&mut *tx)
@@ -1804,34 +1815,6 @@ async fn create_refresh_token(
     .await?;
 
     Ok(issued_token.token)
-}
-
-async fn create_refresh_token_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    user_id: Uuid,
-    family_id: Option<Uuid>,
-    parent_token_id: Option<Uuid>,
-    config: &AppConfig,
-) -> Result<IssuedRefreshToken, AppError> {
-    let issued_token = build_refresh_token_record(config, family_id, parent_token_id);
-
-    sqlx::query(
-        r#"INSERT INTO refresh_tokens (id, user_id, family_id, parent_token_id, token_hash, expires_at)
-           VALUES ($1, $2, $3, $4, $5, $6)"#,
-    )
-    .bind(issued_token.id)
-    .bind(user_id)
-    .bind(issued_token.family_id)
-    .bind(issued_token.parent_token_id)
-    .bind(issued_token.token_hash)
-    .bind(issued_token.expires_at)
-    .execute(&mut **tx)
-    .await?;
-
-    Ok(IssuedRefreshToken {
-        id: issued_token.id,
-        token: issued_token.token,
-    })
 }
 
 struct RefreshTokenInsert {

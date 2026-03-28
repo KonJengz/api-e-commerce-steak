@@ -10,7 +10,7 @@ use crate::AppState;
 use crate::shared::background::spawn_app_task;
 use crate::shared::email;
 use crate::shared::errors::AppError;
-use crate::shared::extractors::AuthUser;
+use crate::shared::extractors::{AdminUser, AuthUser};
 use crate::shared::pagination::{PaginatedResponse, PaginationQuery};
 
 use super::model::*;
@@ -18,6 +18,11 @@ use super::service;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/admin", get(list_orders_for_admin))
+        .route(
+            "/admin/{id}",
+            get(get_order_for_admin).put(update_order_for_admin),
+        )
         .route("/", get(list_orders).post(create_order))
         .route("/{id}", get(get_order))
 }
@@ -61,6 +66,16 @@ async fn list_orders(
     Ok(Json(orders))
 }
 
+/// GET /api/orders/admin
+async fn list_orders_for_admin(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Query(query): Query<PaginationQuery>,
+) -> Result<Json<PaginatedResponse<AdminOrder>>, AppError> {
+    let orders = service::list_orders_for_admin(&state.pool, query).await?;
+    Ok(Json(orders))
+}
+
 /// GET /api/orders/:id
 async fn get_order(
     State(state): State<AppState>,
@@ -68,5 +83,44 @@ async fn get_order(
     Path(id): Path<Uuid>,
 ) -> Result<Json<OrderResponse>, AppError> {
     let order = service::get_order(&state.pool, auth.user_id, id).await?;
+    Ok(Json(order))
+}
+
+/// GET /api/orders/admin/:id
+async fn get_order_for_admin(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<AdminOrderResponse>, AppError> {
+    let order = service::get_order_for_admin(&state.pool, id).await?;
+    Ok(Json(order))
+}
+
+/// PUT /api/orders/admin/:id
+async fn update_order_for_admin(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<UpdateOrderRequest>,
+) -> Result<Json<AdminOrderResponse>, AppError> {
+    body.validate()
+        .map_err(|error| AppError::BadRequest(error.to_string()))?;
+
+    let (order, notification) = service::update_order_for_admin(&state.pool, id, &body).await?;
+
+    if let Some(notification) = notification {
+        let config = state.config.clone();
+
+        spawn_app_task("send_order_tracking_email", async move {
+            email::send_order_tracking_email(
+                &notification.user_email,
+                &notification.order_id,
+                &notification.tracking_number,
+                &config,
+            )
+            .await
+        });
+    }
+
     Ok(Json(order))
 }

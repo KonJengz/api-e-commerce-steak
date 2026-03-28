@@ -300,6 +300,20 @@ pub async fn update_order_for_admin(
         ));
     }
 
+    if should_restore_stock(&current_status, &normalized_status) {
+        sqlx::query(
+            r#"UPDATE products AS p
+               SET stock = p.stock + oi.quantity,
+                   updated_at = NOW()
+               FROM order_items AS oi
+               WHERE oi.order_id = $1
+                 AND oi.product_id = p.id"#,
+        )
+        .bind(order_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
     let updated_order = sqlx::query_as::<_, Order>(
         r#"UPDATE orders
            SET status = $1,
@@ -497,6 +511,10 @@ fn validate_order_status_transition(current: &str, next: &str) -> Result<(), App
     }
 }
 
+fn should_restore_stock(current: &str, next: &str) -> bool {
+    current != ORDER_STATUS_CANCELLED && next == ORDER_STATUS_CANCELLED
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,6 +557,26 @@ mod tests {
         assert!(matches!(
             normalize_tracking_number(Some("   ")),
             Err(AppError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn cancelled_orders_restore_stock_once_when_entering_final_state() {
+        assert!(should_restore_stock(
+            ORDER_STATUS_PENDING,
+            ORDER_STATUS_CANCELLED
+        ));
+        assert!(should_restore_stock(
+            ORDER_STATUS_PAID,
+            ORDER_STATUS_CANCELLED
+        ));
+        assert!(!should_restore_stock(
+            ORDER_STATUS_CANCELLED,
+            ORDER_STATUS_CANCELLED
+        ));
+        assert!(!should_restore_stock(
+            ORDER_STATUS_SHIPPED,
+            ORDER_STATUS_DELIVERED
         ));
     }
 }

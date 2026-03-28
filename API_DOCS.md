@@ -1475,6 +1475,33 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
 ]
 ```
 
+### GET `/api/categories/{id}`
+
+ดู category รายการเดียว (public)
+
+**Response 200:**
+
+```json
+{
+  "id": "category-uuid",
+  "name": "Smartphones",
+  "description": "Mobile devices",
+  "created_at": "2026-03-25T00:00:00Z",
+  "updated_at": "2026-03-25T00:00:00Z"
+}
+```
+
+**Error Example: category not found**
+
+```json
+{
+  "error": {
+    "status": 404,
+    "message": "Category not found"
+  }
+}
+```
+
 ### POST `/api/categories` 🔒 ADMIN
 
 สร้าง category ใหม่
@@ -1509,6 +1536,80 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
   "error": {
     "status": 400,
     "message": "Category already exists"
+  }
+}
+```
+
+**Behavior Notes:**
+
+- ระบบ trim `name` และ `description` ก่อนบันทึก
+- `description` ถ้าส่งเป็น string ว่างหรือมีแต่ space จะถูกเก็บเป็น `null`
+- ชื่อ category ซ้ำกันแบบไม่สนตัวพิมพ์เล็กใหญ่ไม่ได้ เช่น `Smartphones` กับ `smartphones`
+
+### PUT `/api/categories/{id}` 🔒 ADMIN
+
+แก้ไข category
+
+**Headers:** `Authorization: Bearer <access_token>` (ADMIN only)
+
+**Request Body:**
+
+```json
+{
+  "name": "Smartphones & Tablets",
+  "description": "Phones, tablets, and accessories"
+}
+```
+
+**Response 200:**
+
+```json
+{
+  "id": "category-uuid",
+  "name": "Smartphones & Tablets",
+  "description": "Phones, tablets, and accessories",
+  "created_at": "2026-03-25T00:00:00Z",
+  "updated_at": "2026-03-29T02:15:00Z"
+}
+```
+
+**Error Example: duplicate category name**
+
+```json
+{
+  "error": {
+    "status": 400,
+    "message": "Category already exists"
+  }
+}
+```
+
+### DELETE `/api/categories/{id}` 🔒 ADMIN
+
+ลบ category
+
+**Headers:** `Authorization: Bearer <access_token>` (ADMIN only)
+
+**Response 200:**
+
+```json
+{
+  "message": "Category deleted successfully"
+}
+```
+
+**Behavior Notes:**
+
+- ระบบจะไม่ลบ category ถ้ายังมี product ผูก `category_id` นี้อยู่
+- ให้ย้าย product เหล่านั้นไป category อื่น หรือ clear category ออกจาก product ก่อนค่อยลบ
+
+**Error Example: category still in use**
+
+```json
+{
+  "error": {
+    "status": 409,
+    "message": "Cannot delete category while products are assigned to it"
   }
 }
 ```

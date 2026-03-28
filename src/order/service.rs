@@ -1,6 +1,6 @@
 use chrono::Utc;
 use rust_decimal::Decimal;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use crate::shared::errors::AppError;
@@ -207,13 +207,18 @@ pub async fn get_order(
 /// List all orders for admin
 pub async fn list_orders_for_admin(
     pool: &PgPool,
-    query: PaginationQuery,
+    query: AdminOrderListQuery,
 ) -> Result<PaginatedResponse<AdminOrder>, AppError> {
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders")
-        .fetch_one(pool)
-        .await?;
+    let normalized_status = normalize_optional_order_status(query.status.as_deref())?;
+    let normalized_search = normalize_admin_order_search(query.search.as_deref())?;
+    let search_order_id = normalized_search
+        .as_deref()
+        .and_then(|value| Uuid::parse_str(value).ok());
 
-    let orders = sqlx::query_as::<_, AdminOrder>(
+    let mut count_query = QueryBuilder::new(
+        "SELECT COUNT(*) FROM orders o INNER JOIN users u ON u.id = o.user_id WHERE 1 = 1",
+    );
+    let mut data_query = QueryBuilder::new(
         r#"SELECT
                o.id,
                o.user_id,
@@ -227,13 +232,34 @@ pub async fn list_orders_for_admin(
                o.updated_at
            FROM orders o
            INNER JOIN users u ON u.id = o.user_id
-           ORDER BY o.created_at DESC
-           LIMIT $1 OFFSET $2"#,
-    )
-    .bind(query.limit())
-    .bind(query.offset())
-    .fetch_all(pool)
-    .await?;
+           WHERE 1 = 1"#,
+    );
+
+    if let Some(status) = normalized_status.as_deref() {
+        count_query.push(" AND o.status = ");
+        count_query.push_bind(status);
+
+        data_query.push(" AND o.status = ");
+        data_query.push_bind(status);
+    }
+
+    if let Some(search) = normalized_search.as_deref() {
+        let prefix = format!("{}%", search.to_ascii_lowercase());
+        push_admin_order_search_clause(&mut count_query, &prefix, search_order_id);
+        push_admin_order_search_clause(&mut data_query, &prefix, search_order_id);
+    }
+
+    data_query.push(" ORDER BY o.created_at DESC ");
+    data_query.push(" LIMIT ");
+    data_query.push_bind(query.limit());
+    data_query.push(" OFFSET ");
+    data_query.push_bind(query.offset());
+
+    let total: i64 = count_query.build_query_scalar().fetch_one(pool).await?;
+    let orders = data_query
+        .build_query_as::<AdminOrder>()
+        .fetch_all(pool)
+        .await?;
 
     Ok(PaginatedResponse::new(
         orders,
@@ -484,6 +510,62 @@ fn normalize_tracking_number(tracking_number: Option<&str>) -> Result<Option<Str
     }
 }
 
+fn normalize_optional_order_status(status: Option<&str>) -> Result<Option<String>, AppError> {
+    match status {
+        None => Ok(None),
+        Some(value) => normalize_order_status(value).map(Some),
+    }
+}
+
+fn normalize_admin_order_search(search: Option<&str>) -> Result<Option<String>, AppError> {
+    match search {
+        None => Ok(None),
+        Some(value) => {
+            let trimmed = value.trim();
+
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+
+            if trimmed.chars().count() > 100 {
+                return Err(AppError::BadRequest(
+                    "Search must be at most 100 characters".to_string(),
+                ));
+            }
+
+            Ok(Some(trimmed.to_string()))
+        }
+    }
+}
+
+fn push_admin_order_search_clause(
+    query: &mut QueryBuilder<'_, Postgres>,
+    prefix: &str,
+    search_order_id: Option<Uuid>,
+) {
+    query.push(" AND (");
+
+    let mut has_previous_clause = false;
+
+    if let Some(order_id) = search_order_id {
+        query.push("o.id = ");
+        query.push_bind(order_id);
+        has_previous_clause = true;
+    }
+
+    if has_previous_clause {
+        query.push(" OR ");
+    }
+
+    query.push("LOWER(u.name) LIKE ");
+    query.push_bind(prefix.to_string());
+    query.push(" OR LOWER(u.email) LIKE ");
+    query.push_bind(prefix.to_string());
+    query.push(" OR LOWER(COALESCE(o.tracking_number, '')) LIKE ");
+    query.push_bind(prefix.to_string());
+    query.push(")");
+}
+
 fn status_supports_tracking(status: &str) -> bool {
     matches!(status, ORDER_STATUS_SHIPPED | ORDER_STATUS_DELIVERED)
 }
@@ -577,6 +659,30 @@ mod tests {
         assert!(!should_restore_stock(
             ORDER_STATUS_SHIPPED,
             ORDER_STATUS_DELIVERED
+        ));
+    }
+
+    #[test]
+    fn admin_order_search_trims_blank_values_to_none() {
+        assert_eq!(
+            normalize_admin_order_search(Some("   ")).expect("blank search should normalize"),
+            None
+        );
+        assert_eq!(
+            normalize_admin_order_search(Some(" Jane ")).expect("search should normalize"),
+            Some("Jane".to_string())
+        );
+    }
+
+    #[test]
+    fn optional_status_filter_normalizes_values() {
+        assert_eq!(
+            normalize_optional_order_status(Some(" paid ")).expect("status should normalize"),
+            Some(ORDER_STATUS_PAID.to_string())
+        );
+        assert!(matches!(
+            normalize_optional_order_status(Some("processing")),
+            Err(AppError::BadRequest(_))
         ));
     }
 }

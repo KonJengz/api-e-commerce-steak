@@ -43,6 +43,28 @@ pub struct OrderItemRequest {
     pub quantity: i32,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AdminOrderListQuery {
+    pub status: Option<String>,
+    pub search: Option<String>,
+    pub page: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+impl AdminOrderListQuery {
+    pub fn page(&self) -> i64 {
+        self.page.unwrap_or(1).max(1)
+    }
+
+    pub fn limit(&self) -> i64 {
+        self.limit.unwrap_or(20).clamp(1, 100)
+    }
+
+    pub fn offset(&self) -> i64 {
+        (self.page() - 1) * self.limit()
+    }
+}
+
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct AdminOrder {
     pub id: Uuid,

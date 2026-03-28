@@ -95,20 +95,31 @@ pub fn router() -> Router<AppState> {
         .route("/logout", post(logout))
 }
 
-fn build_refresh_cookie(token: &str, max_age_days: i64, cookie_secure: bool) -> String {
+fn build_refresh_cookie(token: &str, config: &AppConfig) -> String {
+    let max_age_days = config.jwt_refresh_expiry_days;
     let max_age_seconds = max_age_days * 24 * 60 * 60;
-    let secure_flag = if cookie_secure { "Secure; " } else { "" };
+    let secure_flag = if config.cookie_secure { "Secure; " } else { "" };
+    let domain_flag = config
+        .cookie_domain
+        .as_deref()
+        .map(|domain| format!("Domain={domain}; "))
+        .unwrap_or_default();
     format!(
-        "{}={}; HttpOnly; {}SameSite=Strict; Path=/api/auth; Max-Age={}",
-        REFRESH_TOKEN_COOKIE, token, secure_flag, max_age_seconds
+        "{}={}; HttpOnly; {}SameSite=Strict; {}Path=/; Max-Age={}",
+        REFRESH_TOKEN_COOKIE, token, secure_flag, domain_flag, max_age_seconds
     )
 }
 
-fn build_clear_refresh_cookie(cookie_secure: bool) -> String {
-    let secure_flag = if cookie_secure { "Secure; " } else { "" };
+fn build_clear_refresh_cookie(config: &AppConfig) -> String {
+    let secure_flag = if config.cookie_secure { "Secure; " } else { "" };
+    let domain_flag = config
+        .cookie_domain
+        .as_deref()
+        .map(|domain| format!("Domain={domain}; "))
+        .unwrap_or_default();
     format!(
-        "{}=; HttpOnly; {}SameSite=Strict; Path=/api/auth; Max-Age=0",
-        REFRESH_TOKEN_COOKIE, secure_flag
+        "{}=; HttpOnly; {}SameSite=Strict; {}Path=/; Max-Age=0",
+        REFRESH_TOKEN_COOKIE, secure_flag, domain_flag
     )
 }
 
@@ -492,11 +503,7 @@ async fn verify_email(
     let tokens =
         service::verify_email_and_issue_tokens(&state.pool, &body.email, &body.code, &state.config)
             .await?;
-    let cookie = build_refresh_cookie(
-        &tokens.refresh_token,
-        state.config.jwt_refresh_expiry_days,
-        state.config.cookie_secure,
-    );
+    let cookie = build_refresh_cookie(&tokens.refresh_token, &state.config);
     let mut headers = HeaderMap::new();
     headers.insert(SET_COOKIE, cookie.parse().unwrap());
 
@@ -544,11 +551,7 @@ async fn login(
     apply_ip_and_email_limit(&state, "login", &client_ip, email, 20, 10).await?;
 
     let tokens = service::login(&state.pool, email, password, &state.config).await?;
-    let cookie = build_refresh_cookie(
-        &tokens.refresh_token,
-        state.config.jwt_refresh_expiry_days,
-        state.config.cookie_secure,
-    );
+    let cookie = build_refresh_cookie(&tokens.refresh_token, &state.config);
     let mut headers = HeaderMap::new();
     headers.insert(SET_COOKIE, cookie.parse().unwrap());
 
@@ -996,11 +999,7 @@ async fn google_login(
     apply_ip_limit(&state, "google_login", &client_ip, 20).await?;
 
     let tokens = service::google_login(&state.pool, &body.token, None, &state.config).await?;
-    let cookie = build_refresh_cookie(
-        &tokens.refresh_token,
-        state.config.jwt_refresh_expiry_days,
-        state.config.cookie_secure,
-    );
+    let cookie = build_refresh_cookie(&tokens.refresh_token, &state.config);
     let mut headers = HeaderMap::new();
     headers.insert(SET_COOKIE, cookie.parse().unwrap());
 
@@ -1297,11 +1296,7 @@ async fn github_login(
     apply_ip_limit(&state, "github_login", &client_ip, 20).await?;
 
     let tokens = service::github_login(&state.pool, &body.code, &state.config).await?;
-    let cookie = build_refresh_cookie(
-        &tokens.refresh_token,
-        state.config.jwt_refresh_expiry_days,
-        state.config.cookie_secure,
-    );
+    let cookie = build_refresh_cookie(&tokens.refresh_token, &state.config);
     let mut headers = HeaderMap::new();
     headers.insert(SET_COOKIE, cookie.parse().unwrap());
 
@@ -1327,11 +1322,7 @@ async fn oauth_exchange(
 
     let tokens =
         service::exchange_oauth_login_ticket(&state.pool, &body.ticket, &state.config).await?;
-    let cookie = build_refresh_cookie(
-        &tokens.refresh_token,
-        state.config.jwt_refresh_expiry_days,
-        state.config.cookie_secure,
-    );
+    let cookie = build_refresh_cookie(&tokens.refresh_token, &state.config);
     let mut headers = HeaderMap::new();
     headers.insert(SET_COOKIE, cookie.parse().unwrap());
 
@@ -1360,7 +1351,7 @@ async fn refresh_token(
     let tokens = match service::rotate_refresh_token(&state.pool, &old_token, &state.config).await {
         Ok(tokens) => tokens,
         Err(AppError::Unauthorized(message)) => {
-            let clear_cookie = build_clear_refresh_cookie(state.config.cookie_secure);
+            let clear_cookie = build_clear_refresh_cookie(&state.config);
             let mut response = AppError::Unauthorized(message).into_response();
             response
                 .headers_mut()
@@ -1370,11 +1361,7 @@ async fn refresh_token(
         Err(err) => return Err(err),
     };
 
-    let cookie = build_refresh_cookie(
-        &tokens.refresh_token,
-        state.config.jwt_refresh_expiry_days,
-        state.config.cookie_secure,
-    );
+    let cookie = build_refresh_cookie(&tokens.refresh_token, &state.config);
     let mut headers = HeaderMap::new();
     headers.insert(SET_COOKIE, cookie.parse().unwrap());
 
@@ -1395,7 +1382,7 @@ async fn logout(
         service::logout(&state.pool, cookie.value(), &state.config).await?;
     }
 
-    let clear_cookie = build_clear_refresh_cookie(state.config.cookie_secure);
+    let clear_cookie = build_clear_refresh_cookie(&state.config);
     let mut headers = HeaderMap::new();
     headers.insert(SET_COOKIE, clear_cookie.parse().unwrap());
 

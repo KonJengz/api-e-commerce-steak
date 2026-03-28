@@ -48,11 +48,16 @@ pub fn router() -> Router<AppState> {
         .merge(profile_router)
 }
 
-fn build_clear_refresh_cookie(cookie_secure: bool) -> String {
-    let secure_flag = if cookie_secure { "Secure; " } else { "" };
+fn build_clear_refresh_cookie(config: &crate::config::AppConfig) -> String {
+    let secure_flag = if config.cookie_secure { "Secure; " } else { "" };
+    let domain_flag = config
+        .cookie_domain
+        .as_deref()
+        .map(|domain| format!("Domain={domain}; "))
+        .unwrap_or_default();
     format!(
-        "{}=; HttpOnly; {}SameSite=Strict; Path=/api/auth; Max-Age=0",
-        REFRESH_TOKEN_COOKIE, secure_flag
+        "{}=; HttpOnly; {}SameSite=Strict; {}Path=/; Max-Age=0",
+        REFRESH_TOKEN_COOKIE, secure_flag, domain_flag
     )
 }
 
@@ -308,7 +313,7 @@ async fn change_password(
     )
     .await?;
 
-    let clear_cookie = build_clear_refresh_cookie(state.config.cookie_secure);
+    let clear_cookie = build_clear_refresh_cookie(&state.config);
     let mut response_headers = HeaderMap::new();
     response_headers.insert(SET_COOKIE, clear_cookie.parse().unwrap());
 
@@ -341,7 +346,7 @@ async fn set_password(
 
     auth_service::set_password(&state.pool, auth.user_id, &body.new_password).await?;
 
-    let clear_cookie = build_clear_refresh_cookie(state.config.cookie_secure);
+    let clear_cookie = build_clear_refresh_cookie(&state.config);
     let mut response_headers = HeaderMap::new();
     response_headers.insert(SET_COOKIE, clear_cookie.parse().unwrap());
 

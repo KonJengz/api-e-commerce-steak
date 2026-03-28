@@ -48,6 +48,7 @@ pub struct AppConfig {
     pub app_url: String,
     pub app_port: u16,
     pub cookie_secure: bool,
+    pub cookie_domain: Option<String>,
     pub trust_proxy_headers: bool,
     pub cleanup_interval_minutes: u64,
     pub product_image_upload_ttl_minutes: i64,
@@ -78,9 +79,10 @@ impl AppConfig {
             jwt_refresh_expiry_days: parse_i64_env("JWT_REFRESH_EXPIRY_DAYS", 7),
             resend_api_key: env::var("RESEND_API_KEY").expect("RESEND_API_KEY must be set"),
             email_from: env::var("EMAIL_FROM").expect("EMAIL_FROM must be set"),
-            app_url: env::var("APP_URL").unwrap_or_else(|_| "http://localhost:4000".to_string()),
+            app_url: env::var("APP_URL").unwrap_or_else(|_| "http://localhost:3000".to_string()),
             app_port: parse_port_env(4000),
             cookie_secure: parse_bool_env("COOKIE_SECURE", cookie_secure_default),
+            cookie_domain: optional_env("COOKIE_DOMAIN"),
             trust_proxy_headers: parse_bool_env("TRUST_PROXY_HEADERS", false),
             cleanup_interval_minutes: parse_u64_env("CLEANUP_INTERVAL_MINUTES", 10),
             product_image_upload_ttl_minutes: parse_i64_env("PRODUCT_IMAGE_UPLOAD_TTL_MINUTES", 60),
@@ -174,6 +176,16 @@ impl AppConfig {
                 "EMAIL_FROM must be a valid, non-placeholder sender address in production"
             );
         }
+
+        if let Some(cookie_domain) = &self.cookie_domain {
+            assert!(
+                !cookie_domain.contains("://")
+                    && !cookie_domain.contains('/')
+                    && !cookie_domain.contains(';')
+                    && !cookie_domain.contains(','),
+                "COOKIE_DOMAIN must be a hostname only, such as example.com or .example.com"
+            );
+        }
     }
 }
 
@@ -193,6 +205,13 @@ fn parse_bool_env(name: &str, default: bool) -> bool {
         },
         Err(_) => default,
     }
+}
+
+fn optional_env(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn parse_i64_env(name: &str, default: i64) -> i64 {

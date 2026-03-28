@@ -71,7 +71,7 @@ async fn list_orders_for_admin(
     State(state): State<AppState>,
     _admin: AdminUser,
     Query(query): Query<AdminOrderListQuery>,
-) -> Result<Json<PaginatedResponse<AdminOrder>>, AppError> {
+) -> Result<Json<AdminOrderListResponse>, AppError> {
     let orders = service::list_orders_for_admin(&state.pool, query).await?;
     Ok(Json(orders))
 }

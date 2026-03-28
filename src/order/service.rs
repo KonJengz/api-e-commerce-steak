@@ -208,7 +208,7 @@ pub async fn get_order(
 pub async fn list_orders_for_admin(
     pool: &PgPool,
     query: AdminOrderListQuery,
-) -> Result<PaginatedResponse<AdminOrder>, AppError> {
+) -> Result<AdminOrderListResponse, AppError> {
     let normalized_status = normalize_optional_order_status(query.status.as_deref())?;
     let normalized_search = normalize_admin_order_search(query.search.as_deref())?;
     let search_order_id = normalized_search
@@ -256,17 +256,23 @@ pub async fn list_orders_for_admin(
     data_query.push_bind(query.offset());
 
     let total: i64 = count_query.build_query_scalar().fetch_one(pool).await?;
+    let summary =
+        fetch_admin_order_summary(pool, normalized_search.as_deref(), search_order_id).await?;
     let orders = data_query
         .build_query_as::<AdminOrder>()
         .fetch_all(pool)
         .await?;
 
-    Ok(PaginatedResponse::new(
-        orders,
-        total,
-        query.page(),
-        query.limit(),
-    ))
+    let paginated_response = PaginatedResponse::new(orders, total, query.page(), query.limit());
+
+    Ok(AdminOrderListResponse {
+        data: paginated_response.data,
+        total: paginated_response.total,
+        page: paginated_response.page,
+        limit: paginated_response.limit,
+        total_pages: paginated_response.total_pages,
+        summary,
+    })
 }
 
 /// Get a single order with items for admin
@@ -420,6 +426,51 @@ async fn fetch_admin_order(pool: &PgPool, order_id: Uuid) -> Result<AdminOrder, 
     .ok_or_else(|| AppError::NotFound("Order not found".to_string()))
 }
 
+async fn fetch_admin_order_summary(
+    pool: &PgPool,
+    normalized_search: Option<&str>,
+    search_order_id: Option<Uuid>,
+) -> Result<AdminOrderSummary, AppError> {
+    let mut summary_query = QueryBuilder::new(
+        r#"SELECT
+               COUNT(*) AS all_count,
+               COUNT(*) FILTER (WHERE o.status = 'PENDING') AS pending_count,
+               COUNT(*) FILTER (WHERE o.status = 'PAID') AS paid_count,
+               COUNT(*) FILTER (WHERE o.status = 'SHIPPED') AS shipped_count,
+               COUNT(*) FILTER (WHERE o.status = 'DELIVERED') AS delivered_count,
+               COUNT(*) FILTER (WHERE o.status = 'CANCELLED') AS cancelled_count,
+               COUNT(*) FILTER (WHERE o.tracking_number IS NOT NULL) AS tracked_count
+           FROM orders o
+           INNER JOIN users u ON u.id = o.user_id
+           WHERE 1 = 1"#,
+    );
+
+    if let Some(search) = normalized_search {
+        let prefix = format!("{}%", search.to_ascii_lowercase());
+        push_admin_order_search_clause(&mut summary_query, &prefix, search_order_id);
+    }
+
+    let (all, pending, paid, shipped, delivered, cancelled, tracked): (
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = summary_query.build_query_as().fetch_one(pool).await?;
+
+    Ok(AdminOrderSummary {
+        all,
+        pending,
+        paid,
+        shipped,
+        delivered,
+        cancelled,
+        tracked,
+    })
+}
+
 async fn fetch_order_items(pool: &PgPool, order_id: Uuid) -> Result<Vec<OrderItem>, AppError> {
     sqlx::query_as::<_, OrderItem>(
         r#"SELECT id, order_id, product_id, product_name_at_purchase, quantity, price_at_purchase
@@ -513,7 +564,15 @@ fn normalize_tracking_number(tracking_number: Option<&str>) -> Result<Option<Str
 fn normalize_optional_order_status(status: Option<&str>) -> Result<Option<String>, AppError> {
     match status {
         None => Ok(None),
-        Some(value) => normalize_order_status(value).map(Some),
+        Some(value) => {
+            let trimmed = value.trim();
+
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+
+            normalize_order_status(trimmed).map(Some)
+        }
     }
 }
 
@@ -640,6 +699,39 @@ mod tests {
             normalize_tracking_number(Some("   ")),
             Err(AppError::BadRequest(_))
         ));
+    }
+
+    #[test]
+    fn optional_status_normalization_accepts_blank_and_known_values() {
+        assert_eq!(
+            normalize_optional_order_status(Some(" paid ")).expect("status should normalize"),
+            Some(ORDER_STATUS_PAID.to_string())
+        );
+        assert_eq!(
+            normalize_optional_order_status(Some("   ")).expect("blank status should be ignored"),
+            None
+        );
+    }
+
+    #[test]
+    fn optional_status_normalization_rejects_unknown_values() {
+        assert!(matches!(
+            normalize_optional_order_status(Some("processing")),
+            Err(AppError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn admin_order_search_normalization_trims_and_ignores_blank_input() {
+        assert_eq!(
+            normalize_admin_order_search(Some(" jane@example.com "))
+                .expect("search should normalize"),
+            Some("jane@example.com".to_string())
+        );
+        assert_eq!(
+            normalize_admin_order_search(Some("   ")).expect("blank search should be ignored"),
+            None
+        );
     }
 
     #[test]

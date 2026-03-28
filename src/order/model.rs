@@ -109,6 +109,27 @@ pub struct AdminOrderResponse {
     pub items: Vec<OrderItem>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct AdminOrderSummary {
+    pub all: i64,
+    pub pending: i64,
+    pub paid: i64,
+    pub shipped: i64,
+    pub delivered: i64,
+    pub cancelled: i64,
+    pub tracked: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminOrderListResponse {
+    pub data: Vec<AdminOrder>,
+    pub total: i64,
+    pub page: i64,
+    pub limit: i64,
+    pub total_pages: i64,
+    pub summary: AdminOrderSummary,
+}
+
 #[derive(Debug, Deserialize, Serialize, Validate)]
 pub struct UpdateOrderRequest {
     #[validate(length(

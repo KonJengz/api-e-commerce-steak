@@ -9,6 +9,8 @@ use crate::shared::pagination::{PaginatedResponse, PaginationQuery};
 use super::model::*;
 
 const ORDER_STATUS_PENDING: &str = "PENDING";
+const ORDER_STATUS_PAYMENT_REVIEW: &str = "PAYMENT_REVIEW";
+const ORDER_STATUS_PAYMENT_FAILED: &str = "PAYMENT_FAILED";
 const ORDER_STATUS_PAID: &str = "PAID";
 const ORDER_STATUS_SHIPPED: &str = "SHIPPED";
 const ORDER_STATUS_DELIVERED: &str = "DELIVERED";
@@ -122,8 +124,20 @@ pub async fn create_order(
     }
 
     sqlx::query(
-        r#"INSERT INTO orders (id, user_id, shipping_address_id, total_amount, status, tracking_number, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, NULL, $6, $6)"#,
+        r#"INSERT INTO orders (
+               id,
+               user_id,
+               shipping_address_id,
+               total_amount,
+               status,
+               tracking_number,
+               payment_slip_url,
+               payment_slip_public_id,
+               payment_submitted_at,
+               created_at,
+               updated_at
+           )
+           VALUES ($1, $2, $3, $4, $5, NULL, NULL, NULL, NULL, $6, $6)"#,
     )
     .bind(order_id)
     .bind(user_id)
@@ -147,6 +161,8 @@ pub async fn create_order(
         total_amount,
         status: ORDER_STATUS_PENDING.to_string(),
         tracking_number: None,
+        payment_slip_url: None,
+        payment_submitted_at: None,
         created_at: now,
         updated_at: now,
         items: order_items,
@@ -165,7 +181,7 @@ pub async fn list_orders(
         .await?;
 
     let orders = sqlx::query_as::<_, Order>(
-        r#"SELECT id, user_id, shipping_address_id, total_amount, status, tracking_number, created_at, updated_at
+        r#"SELECT id, user_id, shipping_address_id, total_amount, status, tracking_number, payment_slip_url, payment_submitted_at, created_at, updated_at
            FROM orders WHERE user_id = $1
            ORDER BY created_at DESC
            LIMIT $2 OFFSET $3"#,
@@ -191,7 +207,7 @@ pub async fn get_order(
     order_id: Uuid,
 ) -> Result<OrderResponse, AppError> {
     let order = sqlx::query_as::<_, Order>(
-        r#"SELECT id, user_id, shipping_address_id, total_amount, status, tracking_number, created_at, updated_at
+        r#"SELECT id, user_id, shipping_address_id, total_amount, status, tracking_number, payment_slip_url, payment_submitted_at, created_at, updated_at
            FROM orders WHERE id = $1 AND user_id = $2"#,
     )
     .bind(order_id)
@@ -228,6 +244,8 @@ pub async fn list_orders_for_admin(
                o.total_amount,
                o.status,
                o.tracking_number,
+               o.payment_slip_url,
+               o.payment_submitted_at,
                o.created_at,
                o.updated_at
            FROM orders o
@@ -283,6 +301,81 @@ pub async fn get_order_for_admin(
     let order = fetch_admin_order(pool, order_id).await?;
     let items = fetch_order_items(pool, order_id).await?;
     Ok(admin_order_to_response(order, items))
+}
+
+/// Upload or replace a payment slip for an order owned by the current user.
+pub async fn update_order_payment_slip(
+    pool: &PgPool,
+    user_id: Uuid,
+    order_id: Uuid,
+    payment_slip_url: &str,
+    payment_slip_public_id: &str,
+) -> Result<(OrderResponse, Option<String>), AppError> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to begin transaction: {}", e)))?;
+
+    let current_order = sqlx::query_as::<_, (String, Option<String>)>(
+        r#"SELECT status, payment_slip_public_id
+           FROM orders
+           WHERE id = $1 AND user_id = $2
+           FOR UPDATE"#,
+    )
+    .bind(order_id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Order not found".to_string()))?;
+
+    let (current_status, previous_payment_slip_public_id) = current_order;
+
+    if !matches!(
+        current_status.as_str(),
+        ORDER_STATUS_PENDING | ORDER_STATUS_PAYMENT_REVIEW | ORDER_STATUS_PAYMENT_FAILED
+    ) {
+        return Err(AppError::BadRequest(
+            "Payment slip can only be updated before payment is approved".to_string(),
+        ));
+    }
+
+    let now = Utc::now();
+    let order = sqlx::query_as::<_, Order>(
+        r#"UPDATE orders
+           SET payment_slip_url = $1,
+               payment_slip_public_id = $2,
+               payment_submitted_at = $3,
+               status = $4,
+               updated_at = $3
+           WHERE id = $5
+           RETURNING id, user_id, shipping_address_id, total_amount, status, tracking_number, payment_slip_url, payment_submitted_at, created_at, updated_at"#,
+    )
+    .bind(payment_slip_url)
+    .bind(payment_slip_public_id)
+    .bind(now)
+    .bind(ORDER_STATUS_PAYMENT_REVIEW)
+    .bind(order_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let items = sqlx::query_as::<_, OrderItem>(
+        r#"SELECT id, order_id, product_id, product_name_at_purchase, quantity, price_at_purchase
+           FROM order_items
+           WHERE order_id = $1
+           ORDER BY id ASC"#,
+    )
+    .bind(order_id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    tx.commit()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to commit transaction: {}", e)))?;
+
+    Ok((
+        order_to_response(order, items),
+        previous_payment_slip_public_id,
+    ))
 }
 
 /// Update an order as admin, including status and optional tracking number.
@@ -352,7 +445,7 @@ pub async fn update_order_for_admin(
                tracking_number = $2,
                updated_at = NOW()
            WHERE id = $3
-           RETURNING id, user_id, shipping_address_id, total_amount, status, tracking_number, created_at, updated_at"#,
+           RETURNING id, user_id, shipping_address_id, total_amount, status, tracking_number, payment_slip_url, payment_submitted_at, created_at, updated_at"#,
     )
     .bind(&normalized_status)
     .bind(final_tracking_number.as_deref())
@@ -395,6 +488,8 @@ pub async fn update_order_for_admin(
         total_amount: updated_order.total_amount,
         status: updated_order.status,
         tracking_number: updated_order.tracking_number,
+        payment_slip_url: updated_order.payment_slip_url,
+        payment_submitted_at: updated_order.payment_submitted_at,
         created_at: updated_order.created_at,
         updated_at: updated_order.updated_at,
         items,
@@ -414,6 +509,8 @@ async fn fetch_admin_order(pool: &PgPool, order_id: Uuid) -> Result<AdminOrder, 
                o.total_amount,
                o.status,
                o.tracking_number,
+               o.payment_slip_url,
+               o.payment_submitted_at,
                o.created_at,
                o.updated_at
            FROM orders o
@@ -435,6 +532,8 @@ async fn fetch_admin_order_summary(
         r#"SELECT
                COUNT(*) AS all_count,
                COUNT(*) FILTER (WHERE o.status = 'PENDING') AS pending_count,
+               COUNT(*) FILTER (WHERE o.status = 'PAYMENT_REVIEW') AS payment_review_count,
+               COUNT(*) FILTER (WHERE o.status = 'PAYMENT_FAILED') AS payment_failed_count,
                COUNT(*) FILTER (WHERE o.status = 'PAID') AS paid_count,
                COUNT(*) FILTER (WHERE o.status = 'SHIPPED') AS shipped_count,
                COUNT(*) FILTER (WHERE o.status = 'DELIVERED') AS delivered_count,
@@ -450,19 +549,24 @@ async fn fetch_admin_order_summary(
         push_admin_order_search_clause(&mut summary_query, &prefix, search_order_id);
     }
 
-    let (all, pending, paid, shipped, delivered, cancelled, tracked): (
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-    ) = summary_query.build_query_as().fetch_one(pool).await?;
+    let (
+        all,
+        pending,
+        payment_review,
+        payment_failed,
+        paid,
+        shipped,
+        delivered,
+        cancelled,
+        tracked,
+    ): (i64, i64, i64, i64, i64, i64, i64, i64, i64) =
+        summary_query.build_query_as().fetch_one(pool).await?;
 
     Ok(AdminOrderSummary {
         all,
         pending,
+        payment_review,
+        payment_failed,
         paid,
         shipped,
         delivered,
@@ -492,6 +596,8 @@ fn order_to_response(order: Order, items: Vec<OrderItem>) -> OrderResponse {
         total_amount: order.total_amount,
         status: order.status,
         tracking_number: order.tracking_number,
+        payment_slip_url: order.payment_slip_url,
+        payment_submitted_at: order.payment_submitted_at,
         created_at: order.created_at,
         updated_at: order.updated_at,
         items,
@@ -508,6 +614,8 @@ fn admin_order_to_response(order: AdminOrder, items: Vec<OrderItem>) -> AdminOrd
         total_amount: order.total_amount,
         status: order.status,
         tracking_number: order.tracking_number,
+        payment_slip_url: order.payment_slip_url,
+        payment_submitted_at: order.payment_submitted_at,
         created_at: order.created_at,
         updated_at: order.updated_at,
         items,
@@ -524,14 +632,15 @@ fn normalize_order_status(status: &str) -> Result<String, AppError> {
     if !matches!(
         normalized.as_str(),
         ORDER_STATUS_PENDING
+            | ORDER_STATUS_PAYMENT_REVIEW
+            | ORDER_STATUS_PAYMENT_FAILED
             | ORDER_STATUS_PAID
             | ORDER_STATUS_SHIPPED
             | ORDER_STATUS_DELIVERED
             | ORDER_STATUS_CANCELLED
     ) {
         return Err(AppError::BadRequest(
-            "Invalid order status. Allowed values: PENDING, PAID, SHIPPED, DELIVERED, CANCELLED"
-                .to_string(),
+            "Invalid order status. Allowed values: PENDING, PAYMENT_REVIEW, PAYMENT_FAILED, PAID, SHIPPED, DELIVERED, CANCELLED".to_string(),
         ));
     }
 
@@ -635,7 +744,18 @@ fn validate_order_status_transition(current: &str, next: &str) -> Result<(), App
     }
 
     let is_allowed = match current {
-        ORDER_STATUS_PENDING => matches!(next, ORDER_STATUS_PAID | ORDER_STATUS_CANCELLED),
+        ORDER_STATUS_PENDING => {
+            matches!(next, ORDER_STATUS_PAYMENT_REVIEW | ORDER_STATUS_CANCELLED)
+        }
+        ORDER_STATUS_PAYMENT_REVIEW => {
+            matches!(
+                next,
+                ORDER_STATUS_PAID | ORDER_STATUS_PAYMENT_FAILED | ORDER_STATUS_CANCELLED
+            )
+        }
+        ORDER_STATUS_PAYMENT_FAILED => {
+            matches!(next, ORDER_STATUS_PAYMENT_REVIEW | ORDER_STATUS_CANCELLED)
+        }
         ORDER_STATUS_PAID => matches!(next, ORDER_STATUS_SHIPPED | ORDER_STATUS_CANCELLED),
         ORDER_STATUS_SHIPPED => next == ORDER_STATUS_DELIVERED,
         ORDER_STATUS_DELIVERED | ORDER_STATUS_CANCELLED => false,

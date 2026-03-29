@@ -7,6 +7,7 @@ use crate::shared::errors::AppError;
 
 const PRODUCT_IMAGES_FOLDER: &str = "products";
 const USER_IMAGES_FOLDER: &str = "users";
+const ORDER_PAYMENT_SLIPS_FOLDER: &str = "orders/payment-slips";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UploadedImage {
@@ -45,6 +46,22 @@ pub async fn upload_user_image(
 ) -> Result<UploadedImage, AppError> {
     upload_image_to_folder(
         USER_IMAGES_FOLDER,
+        file_name,
+        file_data,
+        content_type,
+        config,
+    )
+    .await
+}
+
+pub async fn upload_order_payment_slip(
+    file_name: &str,
+    file_data: Vec<u8>,
+    content_type: &str,
+    config: &AppConfig,
+) -> Result<UploadedImage, AppError> {
+    upload_image_to_folder(
+        ORDER_PAYMENT_SLIPS_FOLDER,
         file_name,
         file_data,
         content_type,

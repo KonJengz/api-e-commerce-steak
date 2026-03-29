@@ -1796,7 +1796,9 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
 
 ### Order Status Values
 
-- `PENDING`: สร้าง order แล้ว รอ admin ตรวจสอบ/ยืนยันการชำระเงิน
+- `PENDING`: สร้าง order แล้ว แต่ user ยังไม่ได้อัปโหลด slip
+- `PAYMENT_REVIEW`: user อัปโหลด slip แล้ว รอ admin ตรวจสอบ
+- `PAYMENT_FAILED`: admin ตรวจสอบแล้วพบว่าเงินยังไม่เข้า หรือ slip มีปัญหา ต้องให้ user อัปโหลด slip ใหม่
 - `PAID`: admin ยืนยันการชำระเงินแล้ว
 - `SHIPPED`: จัดส่งแล้ว ต้องมี `tracking_number`
 - `DELIVERED`: ส่งสำเร็จแล้ว
@@ -1804,11 +1806,33 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
 
 **Admin transition rules:**
 
-- `PENDING -> PAID` หรือ `PENDING -> CANCELLED`
+- `PENDING -> PAYMENT_REVIEW` หรือ `PENDING -> CANCELLED`
+- `PAYMENT_REVIEW -> PAID` หรือ `PAYMENT_REVIEW -> PAYMENT_FAILED` หรือ `PAYMENT_REVIEW -> CANCELLED`
+- `PAYMENT_FAILED -> PAYMENT_REVIEW` หรือ `PAYMENT_FAILED -> CANCELLED`
 - `PAID -> SHIPPED` หรือ `PAID -> CANCELLED`
 - `SHIPPED -> DELIVERED`
 - อนุญาตให้ส่ง status เดิมซ้ำได้ เช่น `SHIPPED -> SHIPPED` เพื่ออัปเดต `tracking_number`
 - `DELIVERED` และ `CANCELLED` ถือเป็น final state
+
+**User payment-slip flow:**
+
+1. user สร้าง order ก่อนด้วย `POST /api/orders`
+2. user อัปโหลด slip ด้วย `PUT /api/orders/{id}/payment-slip`
+3. ระบบจะเปลี่ยน status เป็น `PAYMENT_REVIEW`
+4. admin ตรวจสอบแล้วอัปเดตเป็น `PAID` หรือ `PAYMENT_FAILED`
+5. ถ้าเป็น `PAYMENT_FAILED` user อัปโหลด slip ใหม่ได้ และ status จะกลับเป็น `PAYMENT_REVIEW`
+6. หลัง `PAID` แล้ว admin ค่อยอัปเดตเป็น `SHIPPED` พร้อม `tracking_number`
+
+**Background auto-cancel defaults:**
+
+- `PENDING`: ถ้ายังไม่อัปโหลด slip ภายใน `60 นาที` ระบบจะ auto-cancel order และคืน stock
+- `PAYMENT_FAILED`: ถ้า user ไม่อัปโหลด slip ใหม่ภายใน `24 ชั่วโมง` ระบบจะ auto-cancel order และคืน stock
+- ค่าพวกนี้เป็น config ฝั่ง backend ผ่าน env:
+  `ORDER_PENDING_TIMEOUT_MINUTES`,
+  `ORDER_PAYMENT_FAILED_TIMEOUT_MINUTES`
+- `PAYMENT_REVIEW` จะค้างรอ admin ตรวจสอบจนกว่าจะมีการอัปเดตเอง ไม่มี background auto-cancel สำหรับสถานะนี้
+- ถ้าสถานะกลายเป็น `CANCELLED` จาก background cleanup แล้ว ถือเป็น final state และ frontend ควรให้ user สร้าง order ใหม่แทน
+- backend เก็บ `payment_slip_url` เดิมไว้เพื่อ audit; การ auto-cancel ไม่ลบรูปสลิปย้อนหลัง
 
 **Tracking Number Rules:**
 
@@ -1846,6 +1870,8 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
   "total_amount": "79800.00",
   "status": "PENDING",
   "tracking_number": null,
+  "payment_slip_url": null,
+  "payment_submitted_at": null,
   "created_at": "2026-03-27T10:30:00Z",
   "updated_at": "2026-03-27T10:30:00Z",
   "items": [
@@ -1858,6 +1884,76 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
       "price_at_purchase": "39900.00"
     }
   ]
+}
+```
+
+**Frontend Notes:**
+
+- endpoint นี้สร้าง order และตัด stock ทันที
+- หลังได้ `order_id` แล้ว ให้พา user ไปอัปโหลด slip ต่อด้วย `PUT /api/orders/{id}/payment-slip`
+- ถ้า user ทิ้ง order ไว้จนหมดเวลา ระบบอาจเปลี่ยน status เป็น `CANCELLED` จาก background cleanup ได้เอง
+
+---
+
+### PUT `/api/orders/{id}/payment-slip`
+
+user อัปโหลดหรือเปลี่ยน slip ของ order ตัวเอง
+
+**Headers:** `Authorization: Bearer <access_token>`
+
+**Content-Type:** `multipart/form-data`
+
+**Form Fields:**
+- `slip` (file, required): `image/jpeg`, `image/png`, `image/webp`, สูงสุด 5 MB
+
+**Response 200:**
+
+```json
+{
+  "id": "order-uuid",
+  "user_id": "user-uuid",
+  "shipping_address_id": "address-uuid",
+  "total_amount": "79800.00",
+  "status": "PAYMENT_REVIEW",
+  "tracking_number": null,
+  "payment_slip_url": "https://res.cloudinary.com/...",
+  "payment_submitted_at": "2026-03-27T10:45:00Z",
+  "created_at": "2026-03-27T10:30:00Z",
+  "updated_at": "2026-03-27T10:45:00Z",
+  "items": [
+    {
+      "id": "order-item-uuid",
+      "order_id": "order-uuid",
+      "product_id": "product-uuid",
+      "product_name_at_purchase": "iPhone 16",
+      "quantity": 2,
+      "price_at_purchase": "39900.00"
+    }
+  ]
+}
+```
+
+**Frontend Notes:**
+
+- endpoint นี้ใช้ได้เฉพาะ order ของ user เอง
+- อัปโหลดสำเร็จแล้ว status จะถูกเปลี่ยนเป็น `PAYMENT_REVIEW` เสมอ
+- ถ้า order ถูก admin เปลี่ยนเป็น `PAID`, `SHIPPED`, `DELIVERED`, หรือ `CANCELLED` แล้ว จะอัปโหลด slip ใหม่ไม่ได้
+
+**Behavior Notes:**
+
+- ถ้าอัปโหลดสำเร็จ ระบบจะเปลี่ยน status เป็น `PAYMENT_REVIEW` อัตโนมัติ
+- user อัปโหลด slip ใหม่ได้ตอน order อยู่ใน `PENDING`, `PAYMENT_REVIEW`, หรือ `PAYMENT_FAILED`
+- ถ้า order ถูกอนุมัติชำระเงินแล้ว (`PAID`) หรือเข้าสถานะหลังจากนั้น จะอัปโหลด slip ใหม่ไม่ได้
+- การอัปโหลด slip ใหม่จะ replace รูปเดิมของ order
+
+**Error Example: payment already approved**
+
+```json
+{
+  "error": {
+    "status": 400,
+    "message": "Payment slip can only be updated before payment is approved"
+  }
 }
 ```
 
@@ -1885,6 +1981,8 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
       "total_amount": "79800.00",
       "status": "PENDING",
       "tracking_number": null,
+      "payment_slip_url": null,
+      "payment_submitted_at": null,
       "created_at": "2026-03-27T10:30:00Z",
       "updated_at": "2026-03-27T10:30:00Z"
     }
@@ -1914,6 +2012,8 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
   "total_amount": "79800.00",
   "status": "PENDING",
   "tracking_number": null,
+  "payment_slip_url": null,
+  "payment_submitted_at": null,
   "created_at": "2026-03-27T10:30:00Z",
   "updated_at": "2026-03-27T10:30:00Z",
   "items": [
@@ -1940,13 +2040,13 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
 **Query Parameters:**
 - `page` (number): default 1
 - `limit` (number): default 20
-- `status` (string, optional): `PENDING`, `PAID`, `SHIPPED`, `DELIVERED`, `CANCELLED`
+- `status` (string, optional): `PENDING`, `PAYMENT_REVIEW`, `PAYMENT_FAILED`, `PAID`, `SHIPPED`, `DELIVERED`, `CANCELLED`
 - `search` (string, optional): ค้นหาแบบ case-insensitive prefix จาก `user_name`, `user_email`, `tracking_number`; ถ้าเป็น UUID เต็มจะ match `order_id` ตรง ๆ ด้วย
 
 **Example:**
 
 ```text
-GET /api/orders/admin?page=1&limit=20&status=PAID&search=jane
+GET /api/orders/admin?page=1&limit=20&status=PAYMENT_REVIEW&search=jane
 ```
 
 **Response 200:**
@@ -1961,8 +2061,10 @@ GET /api/orders/admin?page=1&limit=20&status=PAID&search=jane
       "user_email": "jane@example.com",
       "shipping_address_id": "address-uuid",
       "total_amount": "79800.00",
-      "status": "PAID",
+      "status": "PAYMENT_REVIEW",
       "tracking_number": null,
+      "payment_slip_url": "https://res.cloudinary.com/...",
+      "payment_submitted_at": "2026-03-27T10:45:00Z",
       "created_at": "2026-03-27T10:30:00Z",
       "updated_at": "2026-03-27T11:15:00Z"
     }
@@ -1970,7 +2072,18 @@ GET /api/orders/admin?page=1&limit=20&status=PAID&search=jane
   "total": 1,
   "page": 1,
   "limit": 20,
-  "total_pages": 1
+  "total_pages": 1,
+  "summary": {
+    "all": 12,
+    "pending": 2,
+    "payment_review": 4,
+    "payment_failed": 1,
+    "paid": 3,
+    "shipped": 1,
+    "delivered": 1,
+    "cancelled": 0,
+    "tracked": 2
+  }
 }
 ```
 
@@ -1978,9 +2091,12 @@ GET /api/orders/admin?page=1&limit=20&status=PAID&search=jane
 
 - ใช้เส้นนี้ทำ admin order table ได้เลย
 - `tracking_number` อาจเป็น `null`
+- `payment_slip_url` อาจเป็น `null` ถ้า user ยังไม่อัปโหลด slip
+- `payment_submitted_at` มีค่าเมื่อ user ส่ง slip มาแล้ว
 - `updated_at` เปลี่ยนเมื่อ admin อัปเดต status หรือ tracking
-- `status` เหมาะกับ tab/filter เช่น Pending / Paid / Shipped
+- `status` เหมาะกับ tab/filter เช่น Pending / Review / Failed / Paid / Shipped
 - `search` ตั้งใจให้ใช้กับ queue UI โดยไม่ต้องยิงหลาย endpoint
+- `summary` เอาไปแสดง badge/overview ฝั่ง admin queue ได้ทันที
 - ถ้า frontend ส่ง `status` ที่ไม่อยู่ใน enum ระบบจะตอบ `400`
 
 ---
@@ -2001,8 +2117,10 @@ GET /api/orders/admin?page=1&limit=20&status=PAID&search=jane
   "user_email": "jane@example.com",
   "shipping_address_id": "address-uuid",
   "total_amount": "79800.00",
-  "status": "PAID",
+  "status": "PAYMENT_REVIEW",
   "tracking_number": null,
+  "payment_slip_url": "https://res.cloudinary.com/...",
+  "payment_submitted_at": "2026-03-27T10:45:00Z",
   "created_at": "2026-03-27T10:30:00Z",
   "updated_at": "2026-03-27T11:15:00Z",
   "items": [
@@ -2026,11 +2144,19 @@ admin อัปเดต status ของ order และใส่ `tracking_num
 
 **Headers:** `Authorization: Bearer <admin_access_token>`
 
-**Request Body Example: mark paid**
+**Request Body Example: approve payment**
 
 ```json
 {
   "status": "PAID"
+}
+```
+
+**Request Body Example: reject slip**
+
+```json
+{
+  "status": "PAYMENT_FAILED"
 }
 ```
 
@@ -2064,6 +2190,8 @@ admin อัปเดต status ของ order และใส่ `tracking_num
   "total_amount": "79800.00",
   "status": "SHIPPED",
   "tracking_number": "TH1234567890",
+  "payment_slip_url": "https://res.cloudinary.com/...",
+  "payment_submitted_at": "2026-03-27T10:45:00Z",
   "created_at": "2026-03-27T10:30:00Z",
   "updated_at": "2026-03-27T12:00:00Z",
   "items": [
@@ -2081,6 +2209,8 @@ admin อัปเดต status ของ order และใส่ `tracking_num
 
 **Behavior Notes:**
 
+- ปกติ admin ควรอนุมัติจาก `PAYMENT_REVIEW -> PAID` หรือ reject เป็น `PAYMENT_FAILED`
+- ถ้า admin เปลี่ยนเป็น `PAYMENT_FAILED` frontend ควรเปิดให้ user อัปโหลด slip ใหม่
 - ถ้า `tracking_number` ถูกตั้งหรือเปลี่ยน ระบบจะส่งอีเมลแจ้งลูกค้าแบบ async หลัง update สำเร็จ
 - ถ้า `status = SHIPPED` แต่ไม่ส่ง `tracking_number` และ order เดิมยังไม่มี tracking ระบบจะตอบ `400`
 - ถ้า `tracking_number` ถูกส่งมาพร้อม status ที่ไม่ใช่ `SHIPPED` หรือ `DELIVERED` ระบบจะตอบ `400`

@@ -52,6 +52,8 @@ pub struct AppConfig {
     pub trust_proxy_headers: bool,
     pub cleanup_interval_minutes: u64,
     pub product_image_upload_ttl_minutes: i64,
+    pub order_pending_timeout_minutes: i64,
+    pub order_payment_failed_timeout_minutes: i64,
     pub log_json: bool,
     pub google_client_id: String,
     pub google_client_secret: String,
@@ -86,6 +88,11 @@ impl AppConfig {
             trust_proxy_headers: parse_bool_env("TRUST_PROXY_HEADERS", false),
             cleanup_interval_minutes: parse_u64_env("CLEANUP_INTERVAL_MINUTES", 10),
             product_image_upload_ttl_minutes: parse_i64_env("PRODUCT_IMAGE_UPLOAD_TTL_MINUTES", 60),
+            order_pending_timeout_minutes: parse_i64_env("ORDER_PENDING_TIMEOUT_MINUTES", 60),
+            order_payment_failed_timeout_minutes: parse_i64_env(
+                "ORDER_PAYMENT_FAILED_TIMEOUT_MINUTES",
+                24 * 60,
+            ),
             log_json: parse_bool_env("LOG_JSON", log_json_default),
             google_client_id: env::var("GOOGLE_CLIENT_ID")
                 .unwrap_or_else(|_| "your-google-client-id".to_string()),
@@ -135,6 +142,14 @@ impl AppConfig {
         assert!(
             self.product_image_upload_ttl_minutes > 0,
             "PRODUCT_IMAGE_UPLOAD_TTL_MINUTES must be greater than 0"
+        );
+        assert!(
+            self.order_pending_timeout_minutes >= 0,
+            "ORDER_PENDING_TIMEOUT_MINUTES must be greater than or equal to 0"
+        );
+        assert!(
+            self.order_payment_failed_timeout_minutes >= 0,
+            "ORDER_PAYMENT_FAILED_TIMEOUT_MINUTES must be greater than or equal to 0"
         );
 
         if self.app_env.is_production() {

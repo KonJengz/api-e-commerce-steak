@@ -17,6 +17,8 @@ pub fn start_background_jobs(pool: PgPool, config: AppConfig) -> BackgroundJobs 
     tracing::info!(
         cleanup_interval_minutes = config.cleanup_interval_minutes,
         product_image_upload_ttl_minutes = config.product_image_upload_ttl_minutes,
+        order_pending_timeout_minutes = config.order_pending_timeout_minutes,
+        order_payment_failed_timeout_minutes = config.order_payment_failed_timeout_minutes,
         "starting background jobs"
     );
 

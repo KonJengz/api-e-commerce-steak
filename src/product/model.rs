@@ -7,6 +7,7 @@ use validator::Validate;
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct Product {
     pub id: Uuid,
+    pub slug: String,
     pub name: String,
     pub description: Option<String>,
     pub category_id: Option<Uuid>,
@@ -74,6 +75,7 @@ pub struct UpdateProductRequest {
 pub struct ProductFilterQuery {
     pub search: Option<String>,
     pub category_id: Option<Uuid>,
+    pub category_slug: Option<String>,
     pub min_price: Option<Decimal>,
     pub max_price: Option<Decimal>,
     pub in_stock: Option<bool>,

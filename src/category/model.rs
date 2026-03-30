@@ -6,6 +6,7 @@ use validator::Validate;
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct Category {
     pub id: Uuid,
+    pub slug: String,
     pub name: String,
     pub description: Option<String>,
     pub created_at: DateTime<Utc>,

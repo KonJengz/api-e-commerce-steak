@@ -10,3 +10,4 @@ pub mod pagination;
 pub mod password;
 pub mod rate_limit;
 pub mod security;
+pub mod slug;

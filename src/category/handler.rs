@@ -33,9 +33,9 @@ async fn list_categories(State(state): State<AppState>) -> Result<Json<Vec<Categ
 /// GET /api/categories/:id (public)
 async fn get_category(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(identifier): Path<String>,
 ) -> Result<Json<Category>, AppError> {
-    let category = service::get_category(&state.pool, id).await?;
+    let category = service::get_category(&state.pool, &identifier).await?;
     Ok(Json(category))
 }
 

@@ -50,6 +50,7 @@ Base URLs:
 | Field style | Contract |
 | ---------- | -------- |
 | `id`, `user_id`, `product_id`, `order_id` | UUID string |
+| `slug` | lowercase string แบบ URL-safe ใช้ `-` คั่นคำ เช่น `ribeye-steak-2` |
 | `created_at`, `updated_at`, `expires_at` | ISO 8601 datetime string แบบ UTC |
 | field ที่ optional เช่น `image`, `phone` | ถ้าไม่มีค่าจะเป็น `null` ไม่ใช่ omitted |
 | money / decimal fields | ควร parse แบบ decimal-safe และอย่าใช้ JS floating math เป็น source of truth |
@@ -1186,6 +1187,7 @@ _(refresh_token ใหม่จะถูกส่งผ่าน `Set-Cookie` he
 - `limit` (number): จำนวนรายการต่อหน้า (default: 10, max: 100)
 - `search` (string): ค้นหาจาก `name` และ `description`
 - `category_id` (uuid): filter ตาม category
+- `category_slug` (string): filter ตาม current category slug
 - `min_price` (decimal): ราคาต่ำสุด
 - `max_price` (decimal): ราคาสูงสุด
 - `in_stock` (boolean): ถ้าเป็น `true` จะคืนเฉพาะสินค้าที่ stock มากกว่า 0
@@ -1212,6 +1214,7 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
   "data": [
     {
       "id": "uuid-v7",
+      "slug": "iphone-16",
       "name": "iPhone 16",
       "description": "รุ่นล่าสุด",
       "category_id": "category-uuid",
@@ -1233,10 +1236,11 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
 
 **หมายเหตุ:**
 
+- field `slug` คือ canonical product slug ที่ frontend ควรใช้สร้าง URL เช่น `/products/iphone-16`
 - `image_url` ใน `GET /api/products` คือรูปหลักของสินค้า (primary image) ที่ frontend ใช้ map แสดงบน product cards / list pages ได้เลย
 - ถ้าสินค้ายังไม่มีรูปหลัก ค่า `image_url` จะเป็น `null`
-- ถ้าต้องการรูปทั้งหมดของสินค้าให้เรียก `GET /api/products/{id}/images` เพิ่ม
-- ถ้าต้องการหน้า detail ที่ใช้ทั้งข้อมูลสินค้าและ gallery ให้เรียก `GET /api/products/{id}` แล้วตามด้วย `GET /api/products/{id}/images`
+- ถ้าต้องการรูปทั้งหมดของสินค้าให้เรียก `GET /api/products/{identifier}/images` เพิ่ม
+- ถ้าต้องการหน้า detail ที่ใช้ทั้งข้อมูลสินค้าและ gallery ให้เรียก `GET /api/products/{identifier}` แล้วตามด้วย `GET /api/products/{identifier}/images`
 
 **Error Example: invalid price range**
 
@@ -1249,15 +1253,20 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
 }
 ```
 
-### GET `/api/products/{id}`
+### GET `/api/products/{identifier}`
 
-ดู product ตาม id (public)
+ดู product ตาม `uuid`, current slug, หรือ historical slug (public)
+
+**Path Parameter:**
+
+- `identifier`: แนะนำให้ frontend ส่ง current slug เสมอ เช่น `iphone-16`
 
 **Response 200:**
 
 ```json
 {
   "id": "uuid-v7",
+  "slug": "iphone-16",
   "name": "iPhone 16",
   "description": "รุ่นล่าสุด",
   "category_id": "category-uuid",
@@ -1271,11 +1280,15 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
 }
 ```
 
-**หมายเหตุ:** endpoint นี้ก็คืนเฉพาะรูปหลักใน field `image_url` เช่นกัน ถ้าต้องการ gallery ให้เรียก `GET /api/products/{id}/images`
+**Behavior Notes:**
 
-### GET `/api/products/{id}/images`
+- ถ้า request มาด้วย UUID, current slug, หรือ slug เก่าใน history ระบบจะ resolve ไปที่ product ปัจจุบันตัวเดียวกัน
+- response จะคืน `slug` ปัจจุบันเสมอ ดังนั้นถ้า frontend เรียกด้วย slug เก่า ให้ compare `requested slug` กับ `response.slug` แล้วทำ permanent redirect ที่ page layer เอง
+- endpoint นี้คืนเฉพาะรูปหลักใน field `image_url`; ถ้าต้องการ gallery ให้เรียก `GET /api/products/{identifier}/images`
 
-ดูรูปทั้งหมดของ product ตามลำดับปัจจุบัน (public)
+### GET `/api/products/{identifier}/images`
+
+ดูรูปทั้งหมดของ product ตามลำดับปัจจุบัน โดย lookup ได้ทั้ง `uuid`, current slug, และ historical slug (public)
 
 **Response 200:**
 
@@ -1356,6 +1369,11 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
 }
 ```
 
+**Behavior Notes:**
+
+- backend จะสร้าง `slug` จาก `name` แบบ lowercase + hyphen อัตโนมัติ
+- ถ้า slug ชนกัน ระบบจะเติม suffix เช่น `ribeye-steak-2`
+
 ### PUT `/api/products/{id}` 🔒 ADMIN
 
 แก้ไข product (ส่งเฉพาะ field ที่ต้องการแก้) และใช้สำหรับ replace รูปหลักแบบ backward-compatible
@@ -1365,6 +1383,7 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
 - ถ้าจะส่งรูป ต้องส่ง `image_url` และ `image_public_id` มาด้วยกันเสมอ และรูปใหม่จะถูกใช้ได้เฉพาะถ้าเพิ่งอัปโหลดผ่าน `/api/products/upload-image` ที่ยังไม่หมดอายุ
 - ถ้าส่ง `category_id` มา ค่านี้ต้องมีอยู่จริงในระบบ
 - ตอนนี้ API นี้ยังไม่รองรับการ clear category ด้วย `null`; ถ้าไม่ส่ง `category_id` ระบบจะคงค่าเดิมไว้
+- ถ้าแก้ `name` แล้ว canonical `slug` เปลี่ยน ระบบจะเก็บ slug เก่าไว้ใน history เพื่อให้ public lookup หาเจอได้ต่อ
 
 ### POST `/api/products/{id}/images` 🔒 ADMIN
 
@@ -1467,6 +1486,7 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
 [
   {
     "id": "category-uuid",
+    "slug": "smartphones",
     "name": "Smartphones",
     "description": "Mobile devices",
     "created_at": "2026-03-25T00:00:00Z",
@@ -1475,21 +1495,27 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
 ]
 ```
 
-### GET `/api/categories/{id}`
+### GET `/api/categories/{identifier}`
 
-ดู category รายการเดียว (public)
+ดู category ตาม `uuid`, current slug, หรือ historical slug (public)
 
 **Response 200:**
 
 ```json
 {
   "id": "category-uuid",
+  "slug": "smartphones",
   "name": "Smartphones",
   "description": "Mobile devices",
   "created_at": "2026-03-25T00:00:00Z",
   "updated_at": "2026-03-25T00:00:00Z"
 }
 ```
+
+**Behavior Notes:**
+
+- response จะคืน `slug` ปัจจุบันเสมอ
+- ถ้า frontend เปิดด้วย slug เก่า ให้ compare `requested slug` กับ `response.slug` แล้ว redirect ไป URL ใหม่ที่ page layer
 
 **Error Example: category not found**
 
@@ -1522,6 +1548,7 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
 ```json
 {
   "id": "category-uuid",
+  "slug": "smartphones",
   "name": "Smartphones",
   "description": "Mobile devices",
   "created_at": "2026-03-25T00:00:00Z",
@@ -1545,6 +1572,7 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
 - ระบบ trim `name` และ `description` ก่อนบันทึก
 - `description` ถ้าส่งเป็น string ว่างหรือมีแต่ space จะถูกเก็บเป็น `null`
 - ชื่อ category ซ้ำกันแบบไม่สนตัวพิมพ์เล็กใหญ่ไม่ได้ เช่น `Smartphones` กับ `smartphones`
+- backend จะสร้าง `slug` จาก `name` แบบ lowercase + hyphen อัตโนมัติ และถ้าชนจะเติม suffix เช่น `smartphones-2`
 
 ### PUT `/api/categories/{id}` 🔒 ADMIN
 
@@ -1566,12 +1594,17 @@ GET /api/products?page=1&limit=10&search=iphone&min_price=10000&max_price=50000&
 ```json
 {
   "id": "category-uuid",
+  "slug": "smartphones-tablets",
   "name": "Smartphones & Tablets",
   "description": "Phones, tablets, and accessories",
   "created_at": "2026-03-25T00:00:00Z",
   "updated_at": "2026-03-29T02:15:00Z"
 }
 ```
+
+**Behavior Notes:**
+
+- ถ้าแก้ชื่อแล้ว canonical `slug` เปลี่ยน ระบบจะเก็บ slug เก่าไว้ใน history และ public lookup จะยังหา category เดิมเจอได้
 
 **Error Example: duplicate category name**
 

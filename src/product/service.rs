@@ -6,12 +6,14 @@ use uuid::Uuid;
 use crate::config::AppConfig;
 use crate::shared::errors::AppError;
 use crate::shared::pagination::PaginatedResponse;
+use crate::shared::slug::{append_slug_suffix, normalize_slug_lookup, slugify};
 
 use super::model::{
     AttachProductImageRequest, CreateProductRequest, Product, ProductFilterQuery, ProductImage,
     ProductImageMutationResponse, ReorderProductImagesRequest, UpdateProductRequest,
 };
 const MAX_PRODUCT_IMAGES: usize = 4;
+const PRODUCT_SLUG_FALLBACK: &str = "product";
 
 /// List all active products with filters
 pub async fn list_products(
@@ -21,7 +23,7 @@ pub async fn list_products(
     let mut count_query =
         QueryBuilder::new("SELECT COUNT(*) FROM products p WHERE p.is_active = TRUE ");
     let mut data_query = QueryBuilder::new(
-        "SELECT p.id, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at 
+        "SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at 
          FROM products p 
          LEFT JOIN categories c ON p.category_id = c.id 
          WHERE p.is_active = TRUE ",
@@ -50,6 +52,18 @@ pub async fn list_products(
 
         data_query.push(" AND p.category_id = ");
         data_query.push_bind(category_id);
+    }
+
+    if let Some(category_slug) = query
+        .category_slug
+        .as_deref()
+        .and_then(normalize_slug_lookup)
+    {
+        count_query.push(" AND c.slug = ");
+        count_query.push_bind(category_slug.clone());
+
+        data_query.push(" AND c.slug = ");
+        data_query.push_bind(category_slug);
     }
 
     if let Some(min_price) = query.min_price {
@@ -102,26 +116,15 @@ pub async fn list_products(
     ))
 }
 
-/// Get a product by ID
-pub async fn get_product(pool: &PgPool, product_id: Uuid) -> Result<Product, AppError> {
-    let product = sqlx::query_as::<_, Product>(
-        r#"SELECT p.id, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
-           FROM products p
-           LEFT JOIN categories c ON p.category_id = c.id
-           WHERE p.id = $1 AND p.is_active = TRUE"#,
-    )
-    .bind(product_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Product not found".to_string()))?;
-
-    Ok(product)
+/// Get a product by UUID, current slug, or historical slug.
+pub async fn get_product(pool: &PgPool, identifier: &str) -> Result<Product, AppError> {
+    resolve_active_product_by_identifier(pool, identifier).await
 }
 
 /// Get a product by ID regardless of active status (admin/internal use)
 pub async fn get_product_for_admin(pool: &PgPool, product_id: Uuid) -> Result<Product, AppError> {
     let product = sqlx::query_as::<_, Product>(
-        r#"SELECT p.id, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
+        r#"SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
            FROM products p
            LEFT JOIN categories c ON p.category_id = c.id
            WHERE p.id = $1"#,
@@ -148,6 +151,10 @@ pub async fn create_product(
     admin_user_id: Uuid,
     config: &AppConfig,
 ) -> Result<Product, AppError> {
+    let normalized_name = normalize_required_product_name(&req.name)?;
+    let normalized_description =
+        normalize_optional_product_description(req.description.as_deref())?;
+
     if let Some(category_id) = req.category_id {
         ensure_category_exists(pool, category_id).await?;
     }
@@ -156,6 +163,7 @@ pub async fn create_product(
     let now = Utc::now();
     let stock = req.stock.unwrap_or(0);
     let mut tx = pool.begin().await?;
+    let slug = generate_unique_product_slug(&mut tx, &normalized_name, None).await?;
     let requested_image = match (req.image_url.as_deref(), req.image_public_id.as_deref()) {
         (Some(image_url), Some(image_public_id)) => {
             consume_pending_product_image(
@@ -174,17 +182,18 @@ pub async fn create_product(
 
     let product = sqlx::query_as::<_, Product>(
         r#"WITH inserted AS (
-               INSERT INTO products (id, name, description, category_id, image_url, image_public_id, current_price, stock, is_active, created_at, updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, $9, $9)
+               INSERT INTO products (id, slug, name, description, category_id, image_url, image_public_id, current_price, stock, is_active, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10, $10)
                RETURNING *
            )
-           SELECT i.id, i.name, i.description, i.category_id, c.name as category_name, i.image_url, i.image_public_id, i.current_price, i.stock, i.is_active, i.created_at, i.updated_at
+           SELECT i.id, i.slug, i.name, i.description, i.category_id, c.name as category_name, i.image_url, i.image_public_id, i.current_price, i.stock, i.is_active, i.created_at, i.updated_at
            FROM inserted i
            LEFT JOIN categories c ON i.category_id = c.id"#,
     )
     .bind(id)
-    .bind(&req.name)
-    .bind(&req.description)
+    .bind(&slug)
+    .bind(&normalized_name)
+    .bind(&normalized_description)
     .bind(req.category_id)
     .bind(&req.image_url)
     .bind(&req.image_public_id)
@@ -227,6 +236,15 @@ pub async fn update_product(
 
     let mut tx = pool.begin().await?;
     let existing_product = lock_product_for_update(&mut tx, product_id).await?;
+    let normalized_name = normalize_optional_product_name(req.name.as_deref())?;
+    let normalized_description =
+        normalize_optional_product_description(req.description.as_deref())?;
+    let next_slug = match normalized_name.as_deref() {
+        Some(name) if slugify(name, PRODUCT_SLUG_FALLBACK) != existing_product.slug => {
+            Some(generate_unique_product_slug(&mut tx, name, Some(product_id)).await?)
+        }
+        _ => None,
+    };
     let incoming_image_public_id = req.image_public_id.as_deref();
     let incoming_image_url = req.image_url.as_deref();
     let image_changed = incoming_image_public_id.is_some()
@@ -261,19 +279,25 @@ pub async fn update_product(
             stock = COALESCE($4, stock),
             is_active = COALESCE($5, is_active),
             category_id = COALESCE($6, category_id),
-            updated_at = $7
-           WHERE id = $8"#,
+            slug = COALESCE($7, slug),
+            updated_at = $8
+           WHERE id = $9"#,
     )
-    .bind(&req.name)
-    .bind(&req.description)
+    .bind(&normalized_name)
+    .bind(&normalized_description)
     .bind(req.current_price)
     .bind(req.stock)
     .bind(req.is_active)
     .bind(req.category_id)
+    .bind(next_slug.as_deref())
     .bind(Utc::now())
     .bind(product_id)
     .execute(&mut *tx)
     .await?;
+
+    if next_slug.is_some() {
+        save_product_slug_history(&mut tx, product_id, &existing_product.slug).await?;
+    }
 
     if image_changed {
         replace_primary_product_image(
@@ -454,6 +478,131 @@ pub async fn delete_product(pool: &PgPool, product_id: Uuid) -> Result<(), AppEr
     Ok(())
 }
 
+async fn resolve_active_product_by_identifier(
+    pool: &PgPool,
+    identifier: &str,
+) -> Result<Product, AppError> {
+    if let Ok(product_id) = Uuid::parse_str(identifier)
+        && let Some(product) = fetch_active_product_by_id(pool, product_id).await?
+    {
+        return Ok(product);
+    }
+
+    let slug = normalize_slug_lookup(identifier)
+        .ok_or_else(|| AppError::NotFound("Product not found".to_string()))?;
+
+    if let Some(product) = fetch_active_product_by_slug(pool, &slug).await? {
+        return Ok(product);
+    }
+
+    let product = sqlx::query_as::<_, Product>(
+        r#"SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
+           FROM product_slug_history h
+           INNER JOIN products p ON p.id = h.product_id
+           LEFT JOIN categories c ON p.category_id = c.id
+           WHERE h.slug = $1
+             AND p.is_active = TRUE"#,
+    )
+    .bind(&slug)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Product not found".to_string()))?;
+
+    Ok(product)
+}
+
+async fn fetch_active_product_by_id(
+    pool: &PgPool,
+    product_id: Uuid,
+) -> Result<Option<Product>, AppError> {
+    sqlx::query_as::<_, Product>(
+        r#"SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
+           FROM products p
+           LEFT JOIN categories c ON p.category_id = c.id
+           WHERE p.id = $1
+             AND p.is_active = TRUE"#,
+    )
+    .bind(product_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::from)
+}
+
+async fn fetch_active_product_by_slug(
+    pool: &PgPool,
+    slug: &str,
+) -> Result<Option<Product>, AppError> {
+    sqlx::query_as::<_, Product>(
+        r#"SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
+           FROM products p
+           LEFT JOIN categories c ON p.category_id = c.id
+           WHERE p.slug = $1
+             AND p.is_active = TRUE"#,
+    )
+    .bind(slug)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::from)
+}
+
+async fn generate_unique_product_slug(
+    tx: &mut Transaction<'_, Postgres>,
+    name: &str,
+    exclude_product_id: Option<Uuid>,
+) -> Result<String, AppError> {
+    let base_slug = slugify(name, PRODUCT_SLUG_FALLBACK);
+    let mut suffix = 1;
+
+    loop {
+        let candidate = append_slug_suffix(&base_slug, suffix);
+        let exists_in_products = sqlx::query_scalar::<_, bool>(
+            r#"SELECT EXISTS(
+                   SELECT 1
+                   FROM products
+                   WHERE slug = $1
+                     AND ($2::uuid IS NULL OR id <> $2)
+               )"#,
+        )
+        .bind(&candidate)
+        .bind(exclude_product_id)
+        .fetch_one(&mut **tx)
+        .await?;
+
+        if !exists_in_products {
+            let exists_in_history = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM product_slug_history WHERE slug = $1)",
+            )
+            .bind(&candidate)
+            .fetch_one(&mut **tx)
+            .await?;
+
+            if !exists_in_history {
+                return Ok(candidate);
+            }
+        }
+
+        suffix += 1;
+    }
+}
+
+async fn save_product_slug_history(
+    tx: &mut Transaction<'_, Postgres>,
+    product_id: Uuid,
+    previous_slug: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"INSERT INTO product_slug_history (slug, product_id)
+           VALUES ($1, $2)
+           ON CONFLICT (slug) DO NOTHING"#,
+    )
+    .bind(previous_slug)
+    .bind(product_id)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
 pub async fn save_pending_product_image(
     pool: &PgPool,
     public_id: &str,
@@ -522,7 +671,7 @@ where
     E: Executor<'e, Database = Postgres>,
 {
     let product = sqlx::query_as::<_, Product>(
-        r#"SELECT p.id, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
+        r#"SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
            FROM products p
            LEFT JOIN categories c ON p.category_id = c.id
            WHERE p.id = $1"#,
@@ -540,7 +689,7 @@ async fn lock_product_for_update(
     product_id: Uuid,
 ) -> Result<Product, AppError> {
     let product = sqlx::query_as::<_, Product>(
-        r#"SELECT p.id, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
+        r#"SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
            FROM products p
            LEFT JOIN categories c ON p.category_id = c.id
            WHERE p.id = $1
@@ -658,7 +807,7 @@ async fn sync_product_primary_image(
                WHERE id = $4
                RETURNING *
            )
-           SELECT u.id, u.name, u.description, u.category_id, c.name as category_name, u.image_url, u.image_public_id, u.current_price, u.stock, u.is_active, u.created_at, u.updated_at
+           SELECT u.id, u.slug, u.name, u.description, u.category_id, c.name as category_name, u.image_url, u.image_public_id, u.current_price, u.stock, u.is_active, u.created_at, u.updated_at
            FROM updated u
            LEFT JOIN categories c ON u.category_id = c.id"#,
     )
@@ -695,7 +844,7 @@ async fn delete_product_image_internal(
                        WHERE id = $2
                        RETURNING *
                    )
-                   SELECT u.id, u.name, u.description, u.category_id, c.name as category_name, u.image_url, u.image_public_id, u.current_price, u.stock, u.is_active, u.created_at, u.updated_at
+                   SELECT u.id, u.slug, u.name, u.description, u.category_id, c.name as category_name, u.image_url, u.image_public_id, u.current_price, u.stock, u.is_active, u.created_at, u.updated_at
                    FROM updated u
                    LEFT JOIN categories c ON u.category_id = c.id"#,
             )
@@ -808,4 +957,50 @@ async fn consume_pending_product_image(
     }
 
     Ok(())
+}
+
+fn normalize_required_product_name(name: &str) -> Result<String, AppError> {
+    let trimmed = name.trim();
+
+    if trimmed.is_empty() {
+        return Err(AppError::BadRequest("Product name is required".to_string()));
+    }
+
+    if trimmed.chars().count() > 255 {
+        return Err(AppError::BadRequest(
+            "Product name must be at most 255 characters".to_string(),
+        ));
+    }
+
+    Ok(trimmed.to_string())
+}
+
+fn normalize_optional_product_name(name: Option<&str>) -> Result<Option<String>, AppError> {
+    match name {
+        None => Ok(None),
+        Some(value) => normalize_required_product_name(value).map(Some),
+    }
+}
+
+fn normalize_optional_product_description(
+    description: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    match description {
+        None => Ok(None),
+        Some(value) => {
+            let trimmed = value.trim();
+
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+
+            if trimmed.chars().count() > 2000 {
+                return Err(AppError::BadRequest(
+                    "Description must be at most 2000 characters".to_string(),
+                ));
+            }
+
+            Ok(Some(trimmed.to_string()))
+        }
+    }
 }

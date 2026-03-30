@@ -1,9 +1,12 @@
-use sqlx::PgPool;
+use sqlx::{Executor, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::shared::errors::AppError;
+use crate::shared::slug::{append_slug_suffix, normalize_slug_lookup, slugify};
 
 use super::model::*;
+
+const CATEGORY_SLUG_FALLBACK: &str = "category";
 
 /// Create a new category
 pub async fn create_category(
@@ -13,41 +16,65 @@ pub async fn create_category(
     let normalized_name = normalize_category_name(&req.name)?;
     let normalized_description = normalize_optional_description(req.description.as_deref())?;
 
-    ensure_category_name_available(pool, &normalized_name, None).await?;
+    let mut tx = pool.begin().await?;
+    ensure_category_name_available(&mut *tx, &normalized_name, None).await?;
 
     let category_id = Uuid::now_v7();
+    let slug = generate_unique_category_slug(&mut tx, &normalized_name, None).await?;
 
     let category = sqlx::query_as::<_, Category>(
-        r#"INSERT INTO categories (id, name, description, created_at, updated_at)
-           VALUES ($1, $2, $3, NOW(), NOW())
-           RETURNING *"#,
+        r#"INSERT INTO categories (id, slug, name, description, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, NOW(), NOW())
+           RETURNING id, slug, name, description, created_at, updated_at"#,
     )
     .bind(category_id)
+    .bind(slug)
     .bind(normalized_name)
     .bind(normalized_description)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(category)
 }
 
 /// List all categories (ordered by name)
 pub async fn list_categories(pool: &PgPool) -> Result<Vec<Category>, AppError> {
-    let categories =
-        sqlx::query_as::<_, Category>("SELECT * FROM categories ORDER BY LOWER(name) ASC")
-            .fetch_all(pool)
-            .await?;
+    let categories = sqlx::query_as::<_, Category>(
+        "SELECT id, slug, name, description, created_at, updated_at FROM categories ORDER BY LOWER(name) ASC",
+    )
+    .fetch_all(pool)
+    .await?;
 
     Ok(categories)
 }
 
-/// Get a single category by id
-pub async fn get_category(pool: &PgPool, category_id: Uuid) -> Result<Category, AppError> {
-    sqlx::query_as::<_, Category>("SELECT * FROM categories WHERE id = $1")
-        .bind(category_id)
-        .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Category not found".to_string()))
+/// Get a single category by UUID, current slug, or historical slug.
+pub async fn get_category(pool: &PgPool, identifier: &str) -> Result<Category, AppError> {
+    if let Ok(category_id) = Uuid::parse_str(identifier)
+        && let Some(category) = fetch_category_by_id(pool, category_id).await?
+    {
+        return Ok(category);
+    }
+
+    let slug = normalize_slug_lookup(identifier)
+        .ok_or_else(|| AppError::NotFound("Category not found".to_string()))?;
+
+    if let Some(category) = fetch_category_by_slug(pool, &slug).await? {
+        return Ok(category);
+    }
+
+    sqlx::query_as::<_, Category>(
+        r#"SELECT c.id, c.slug, c.name, c.description, c.created_at, c.updated_at
+           FROM category_slug_history h
+           INNER JOIN categories c ON c.id = h.category_id
+           WHERE h.slug = $1"#,
+    )
+    .bind(&slug)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Category not found".to_string()))
 }
 
 /// Update an existing category
@@ -59,31 +86,38 @@ pub async fn update_category(
     let normalized_name = normalize_category_name(&req.name)?;
     let normalized_description = normalize_optional_description(req.description.as_deref())?;
 
-    let exists =
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM categories WHERE id = $1)")
-            .bind(category_id)
-            .fetch_one(pool)
-            .await?;
+    let mut tx = pool.begin().await?;
+    let existing_category = lock_category_for_update(&mut tx, category_id).await?;
 
-    if !exists {
-        return Err(AppError::NotFound("Category not found".to_string()));
-    }
+    ensure_category_name_available(&mut *tx, &normalized_name, Some(category_id)).await?;
 
-    ensure_category_name_available(pool, &normalized_name, Some(category_id)).await?;
+    let next_slug = if slugify(&normalized_name, CATEGORY_SLUG_FALLBACK) != existing_category.slug {
+        Some(generate_unique_category_slug(&mut tx, &normalized_name, Some(category_id)).await?)
+    } else {
+        None
+    };
 
     let category = sqlx::query_as::<_, Category>(
         r#"UPDATE categories
-           SET name = $1,
-               description = $2,
+           SET slug = COALESCE($1, slug),
+               name = $2,
+               description = $3,
                updated_at = NOW()
-           WHERE id = $3
-           RETURNING *"#,
+           WHERE id = $4
+           RETURNING id, slug, name, description, created_at, updated_at"#,
     )
+    .bind(next_slug.as_deref())
     .bind(normalized_name)
     .bind(normalized_description)
     .bind(category_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
+
+    if next_slug.is_some() {
+        save_category_slug_history(&mut tx, category_id, &existing_category.slug).await?;
+    }
+
+    tx.commit().await?;
 
     Ok(category)
 }
@@ -114,11 +148,53 @@ pub async fn delete_category(pool: &PgPool, category_id: Uuid) -> Result<(), App
     Ok(())
 }
 
-async fn ensure_category_name_available(
+async fn fetch_category_by_id(
     pool: &PgPool,
+    category_id: Uuid,
+) -> Result<Option<Category>, AppError> {
+    sqlx::query_as::<_, Category>(
+        "SELECT id, slug, name, description, created_at, updated_at FROM categories WHERE id = $1",
+    )
+    .bind(category_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::from)
+}
+
+async fn fetch_category_by_slug(pool: &PgPool, slug: &str) -> Result<Option<Category>, AppError> {
+    sqlx::query_as::<_, Category>(
+        "SELECT id, slug, name, description, created_at, updated_at FROM categories WHERE slug = $1",
+    )
+    .bind(slug)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::from)
+}
+
+async fn lock_category_for_update(
+    tx: &mut Transaction<'_, Postgres>,
+    category_id: Uuid,
+) -> Result<Category, AppError> {
+    sqlx::query_as::<_, Category>(
+        r#"SELECT id, slug, name, description, created_at, updated_at
+           FROM categories
+           WHERE id = $1
+           FOR UPDATE"#,
+    )
+    .bind(category_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Category not found".to_string()))
+}
+
+async fn ensure_category_name_available<'e, E>(
+    executor: E,
     name: &str,
     exclude_id: Option<Uuid>,
-) -> Result<(), AppError> {
+) -> Result<(), AppError>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let exists = sqlx::query_scalar::<_, bool>(
         r#"SELECT EXISTS(
                SELECT 1
@@ -129,12 +205,70 @@ async fn ensure_category_name_available(
     )
     .bind(name)
     .bind(exclude_id)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
 
     if exists {
         return Err(AppError::BadRequest("Category already exists".to_string()));
     }
+
+    Ok(())
+}
+
+async fn generate_unique_category_slug(
+    tx: &mut Transaction<'_, Postgres>,
+    name: &str,
+    exclude_category_id: Option<Uuid>,
+) -> Result<String, AppError> {
+    let base_slug = slugify(name, CATEGORY_SLUG_FALLBACK);
+    let mut suffix = 1;
+
+    loop {
+        let candidate = append_slug_suffix(&base_slug, suffix);
+        let exists_in_categories = sqlx::query_scalar::<_, bool>(
+            r#"SELECT EXISTS(
+                   SELECT 1
+                   FROM categories
+                   WHERE slug = $1
+                     AND ($2::uuid IS NULL OR id <> $2)
+               )"#,
+        )
+        .bind(&candidate)
+        .bind(exclude_category_id)
+        .fetch_one(&mut **tx)
+        .await?;
+
+        if !exists_in_categories {
+            let exists_in_history = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM category_slug_history WHERE slug = $1)",
+            )
+            .bind(&candidate)
+            .fetch_one(&mut **tx)
+            .await?;
+
+            if !exists_in_history {
+                return Ok(candidate);
+            }
+        }
+
+        suffix += 1;
+    }
+}
+
+async fn save_category_slug_history(
+    tx: &mut Transaction<'_, Postgres>,
+    category_id: Uuid,
+    previous_slug: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"INSERT INTO category_slug_history (slug, category_id)
+           VALUES ($1, $2)
+           ON CONFLICT (slug) DO NOTHING"#,
+    )
+    .bind(previous_slug)
+    .bind(category_id)
+    .execute(&mut **tx)
+    .await?;
 
     Ok(())
 }

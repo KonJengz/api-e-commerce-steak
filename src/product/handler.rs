@@ -60,19 +60,19 @@ async fn list_products(
 /// GET /api/products/:id (public)
 async fn get_product(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(identifier): Path<String>,
 ) -> Result<Json<Product>, AppError> {
-    let product = service::get_product(&state.pool, id).await?;
+    let product = service::get_product(&state.pool, &identifier).await?;
     Ok(Json(product))
 }
 
 /// GET /api/products/:id/images (public)
 async fn list_product_images(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(identifier): Path<String>,
 ) -> Result<Json<Vec<ProductImage>>, AppError> {
-    let _product = service::get_product(&state.pool, id).await?;
-    let images = service::list_product_images(&state.pool, id).await?;
+    let product = service::get_product(&state.pool, &identifier).await?;
+    let images = service::list_product_images(&state.pool, product.id).await?;
     Ok(Json(images))
 }
 

@@ -8,6 +8,7 @@ use validator::Validate;
 pub struct CartItem {
     pub id: Uuid,
     pub product_id: Uuid,
+    pub product_slug: String,
     // Product snapshot for the frontend
     pub product_name: String,
     pub product_image_url: Option<String>,

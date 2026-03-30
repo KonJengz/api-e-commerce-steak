@@ -57,15 +57,15 @@ pub async fn create_order(
             ));
         }
 
-        let product = sqlx::query_as::<_, (Uuid, String, Decimal, i32, bool)>(
-            "SELECT id, name, current_price, stock, is_active FROM products WHERE id = $1 FOR UPDATE",
+        let product = sqlx::query_as::<_, (Uuid, String, String, Decimal, i32, bool)>(
+            "SELECT id, slug, name, current_price, stock, is_active FROM products WHERE id = $1 FOR UPDATE",
         )
         .bind(item.product_id)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("Product {} not found", item.product_id)))?;
 
-        let (product_id, product_name, current_price, stock, is_active) = product;
+        let (product_id, product_slug, product_name, current_price, stock, is_active) = product;
 
         if !is_active {
             return Err(AppError::BadRequest(format!(
@@ -117,6 +117,7 @@ pub async fn create_order(
             id: order_item_id,
             order_id,
             product_id,
+            product_slug: Some(product_slug),
             product_name_at_purchase: product_name,
             quantity: item.quantity,
             price_at_purchase: current_price,
@@ -359,10 +360,11 @@ pub async fn update_order_payment_slip(
     .await?;
 
     let items = sqlx::query_as::<_, OrderItem>(
-        r#"SELECT id, order_id, product_id, product_name_at_purchase, quantity, price_at_purchase
-           FROM order_items
-           WHERE order_id = $1
-           ORDER BY id ASC"#,
+        r#"SELECT oi.id, oi.order_id, oi.product_id, p.slug as product_slug, oi.product_name_at_purchase, oi.quantity, oi.price_at_purchase
+           FROM order_items oi
+           LEFT JOIN products p ON p.id = oi.product_id
+           WHERE oi.order_id = $1
+           ORDER BY oi.id ASC"#,
     )
     .bind(order_id)
     .fetch_all(&mut *tx)
@@ -454,9 +456,11 @@ pub async fn update_order_for_admin(
     .await?;
 
     let items = sqlx::query_as::<_, OrderItem>(
-        r#"SELECT id, order_id, product_id, product_name_at_purchase, quantity, price_at_purchase
-           FROM order_items WHERE order_id = $1
-           ORDER BY id ASC"#,
+        r#"SELECT oi.id, oi.order_id, oi.product_id, p.slug as product_slug, oi.product_name_at_purchase, oi.quantity, oi.price_at_purchase
+           FROM order_items oi
+           LEFT JOIN products p ON p.id = oi.product_id
+           WHERE oi.order_id = $1
+           ORDER BY oi.id ASC"#,
     )
     .bind(order_id)
     .fetch_all(&mut *tx)
@@ -577,10 +581,11 @@ async fn fetch_admin_order_summary(
 
 async fn fetch_order_items(pool: &PgPool, order_id: Uuid) -> Result<Vec<OrderItem>, AppError> {
     sqlx::query_as::<_, OrderItem>(
-        r#"SELECT id, order_id, product_id, product_name_at_purchase, quantity, price_at_purchase
-           FROM order_items
-           WHERE order_id = $1
-           ORDER BY id ASC"#,
+        r#"SELECT oi.id, oi.order_id, oi.product_id, p.slug as product_slug, oi.product_name_at_purchase, oi.quantity, oi.price_at_purchase
+           FROM order_items oi
+           LEFT JOIN products p ON p.id = oi.product_id
+           WHERE oi.order_id = $1
+           ORDER BY oi.id ASC"#,
     )
     .bind(order_id)
     .fetch_all(pool)

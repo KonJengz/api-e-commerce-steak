@@ -23,7 +23,7 @@ pub async fn list_products(
     let mut count_query =
         QueryBuilder::new("SELECT COUNT(*) FROM products p WHERE p.is_active = TRUE ");
     let mut data_query = QueryBuilder::new(
-        "SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at 
+        "SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, c.slug as category_slug, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at 
          FROM products p 
          LEFT JOIN categories c ON p.category_id = c.id 
          WHERE p.is_active = TRUE ",
@@ -124,7 +124,7 @@ pub async fn get_product(pool: &PgPool, identifier: &str) -> Result<Product, App
 /// Get a product by ID regardless of active status (admin/internal use)
 pub async fn get_product_for_admin(pool: &PgPool, product_id: Uuid) -> Result<Product, AppError> {
     let product = sqlx::query_as::<_, Product>(
-        r#"SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
+        r#"SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, c.slug as category_slug, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
            FROM products p
            LEFT JOIN categories c ON p.category_id = c.id
            WHERE p.id = $1"#,
@@ -186,7 +186,7 @@ pub async fn create_product(
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10, $10)
                RETURNING *
            )
-           SELECT i.id, i.slug, i.name, i.description, i.category_id, c.name as category_name, i.image_url, i.image_public_id, i.current_price, i.stock, i.is_active, i.created_at, i.updated_at
+           SELECT i.id, i.slug, i.name, i.description, i.category_id, c.name as category_name, c.slug as category_slug, i.image_url, i.image_public_id, i.current_price, i.stock, i.is_active, i.created_at, i.updated_at
            FROM inserted i
            LEFT JOIN categories c ON i.category_id = c.id"#,
     )
@@ -496,7 +496,7 @@ async fn resolve_active_product_by_identifier(
     }
 
     let product = sqlx::query_as::<_, Product>(
-        r#"SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
+        r#"SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, c.slug as category_slug, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
            FROM product_slug_history h
            INNER JOIN products p ON p.id = h.product_id
            LEFT JOIN categories c ON p.category_id = c.id
@@ -516,7 +516,7 @@ async fn fetch_active_product_by_id(
     product_id: Uuid,
 ) -> Result<Option<Product>, AppError> {
     sqlx::query_as::<_, Product>(
-        r#"SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
+        r#"SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, c.slug as category_slug, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
            FROM products p
            LEFT JOIN categories c ON p.category_id = c.id
            WHERE p.id = $1
@@ -533,7 +533,7 @@ async fn fetch_active_product_by_slug(
     slug: &str,
 ) -> Result<Option<Product>, AppError> {
     sqlx::query_as::<_, Product>(
-        r#"SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
+        r#"SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, c.slug as category_slug, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
            FROM products p
            LEFT JOIN categories c ON p.category_id = c.id
            WHERE p.slug = $1
@@ -671,7 +671,7 @@ where
     E: Executor<'e, Database = Postgres>,
 {
     let product = sqlx::query_as::<_, Product>(
-        r#"SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
+        r#"SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, c.slug as category_slug, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
            FROM products p
            LEFT JOIN categories c ON p.category_id = c.id
            WHERE p.id = $1"#,
@@ -689,7 +689,7 @@ async fn lock_product_for_update(
     product_id: Uuid,
 ) -> Result<Product, AppError> {
     let product = sqlx::query_as::<_, Product>(
-        r#"SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
+        r#"SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, c.slug as category_slug, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at
            FROM products p
            LEFT JOIN categories c ON p.category_id = c.id
            WHERE p.id = $1
@@ -807,7 +807,7 @@ async fn sync_product_primary_image(
                WHERE id = $4
                RETURNING *
            )
-           SELECT u.id, u.slug, u.name, u.description, u.category_id, c.name as category_name, u.image_url, u.image_public_id, u.current_price, u.stock, u.is_active, u.created_at, u.updated_at
+           SELECT u.id, u.slug, u.name, u.description, u.category_id, c.name as category_name, c.slug as category_slug, u.image_url, u.image_public_id, u.current_price, u.stock, u.is_active, u.created_at, u.updated_at
            FROM updated u
            LEFT JOIN categories c ON u.category_id = c.id"#,
     )
@@ -844,7 +844,7 @@ async fn delete_product_image_internal(
                        WHERE id = $2
                        RETURNING *
                    )
-                   SELECT u.id, u.slug, u.name, u.description, u.category_id, c.name as category_name, u.image_url, u.image_public_id, u.current_price, u.stock, u.is_active, u.created_at, u.updated_at
+                   SELECT u.id, u.slug, u.name, u.description, u.category_id, c.name as category_name, c.slug as category_slug, u.image_url, u.image_public_id, u.current_price, u.stock, u.is_active, u.created_at, u.updated_at
                    FROM updated u
                    LEFT JOIN categories c ON u.category_id = c.id"#,
             )

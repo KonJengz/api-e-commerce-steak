@@ -43,6 +43,7 @@ pub async fn get_cart_items(pool: &PgPool, cart_id: Uuid) -> Result<Vec<CartItem
         r#"SELECT 
                ci.id, 
                ci.product_id, 
+               p.slug as product_slug,
                p.name as product_name, 
                p.image_url as product_image_url, 
                p.current_price, 

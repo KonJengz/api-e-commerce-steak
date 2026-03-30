@@ -25,6 +25,7 @@ pub struct OrderItem {
     pub id: Uuid,
     pub order_id: Uuid,
     pub product_id: Uuid,
+    pub product_slug: Option<String>,
     pub product_name_at_purchase: String,
     pub quantity: i32,
     pub price_at_purchase: Decimal,

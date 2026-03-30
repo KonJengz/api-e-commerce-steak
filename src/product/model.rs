@@ -12,6 +12,7 @@ pub struct Product {
     pub description: Option<String>,
     pub category_id: Option<Uuid>,
     pub category_name: Option<String>,
+    pub category_slug: Option<String>,
     pub image_url: Option<String>,
     pub image_public_id: Option<String>,
     pub current_price: Decimal,

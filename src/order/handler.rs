@@ -81,7 +81,7 @@ async fn list_orders(
     State(state): State<AppState>,
     auth: AuthUser,
     Query(query): Query<PaginationQuery>,
-) -> Result<Json<PaginatedResponse<Order>>, AppError> {
+) -> Result<Json<PaginatedResponse<OrderListItemResponse>>, AppError> {
     let orders = service::list_orders(&state.pool, auth.user_id, query).await?;
     Ok(Json(orders))
 }

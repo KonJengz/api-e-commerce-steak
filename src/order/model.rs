@@ -6,11 +6,16 @@ use validator::Validate;
 
 // ─── Database Models ────────────────────────────────────────
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, sqlx::FromRow)]
 pub struct Order {
     pub id: Uuid,
     pub user_id: Uuid,
     pub shipping_address_id: Option<Uuid>,
+    pub shipping_recipient_name: Option<String>,
+    pub shipping_phone: Option<String>,
+    pub shipping_address_line: Option<String>,
+    pub shipping_city: Option<String>,
+    pub shipping_postal_code: Option<String>,
     pub total_amount: Decimal,
     pub status: String,
     pub tracking_number: Option<String>,
@@ -68,13 +73,18 @@ impl AdminOrderListQuery {
     }
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, sqlx::FromRow)]
 pub struct AdminOrder {
     pub id: Uuid,
     pub user_id: Uuid,
     pub user_name: String,
     pub user_email: String,
     pub shipping_address_id: Option<Uuid>,
+    pub shipping_recipient_name: Option<String>,
+    pub shipping_phone: Option<String>,
+    pub shipping_address_line: Option<String>,
+    pub shipping_city: Option<String>,
+    pub shipping_postal_code: Option<String>,
     pub total_amount: Decimal,
     pub status: String,
     pub tracking_number: Option<String>,
@@ -86,11 +96,36 @@ pub struct AdminOrder {
 
 // ─── Response DTOs ──────────────────────────────────────────
 
+#[derive(Debug, Serialize, Clone)]
+pub struct OrderShippingAddressSnapshot {
+    pub recipient_name: String,
+    pub phone: Option<String>,
+    pub address_line: String,
+    pub city: String,
+    pub postal_code: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OrderListItemResponse {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub shipping_address_id: Option<Uuid>,
+    pub shipping_address_snapshot: Option<OrderShippingAddressSnapshot>,
+    pub total_amount: Decimal,
+    pub status: String,
+    pub tracking_number: Option<String>,
+    pub payment_slip_url: Option<String>,
+    pub payment_submitted_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct OrderResponse {
     pub id: Uuid,
     pub user_id: Uuid,
     pub shipping_address_id: Option<Uuid>,
+    pub shipping_address_snapshot: Option<OrderShippingAddressSnapshot>,
     pub total_amount: Decimal,
     pub status: String,
     pub tracking_number: Option<String>,
@@ -102,12 +137,30 @@ pub struct OrderResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct AdminOrderListItemResponse {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub user_name: String,
+    pub user_email: String,
+    pub shipping_address_id: Option<Uuid>,
+    pub shipping_address_snapshot: Option<OrderShippingAddressSnapshot>,
+    pub total_amount: Decimal,
+    pub status: String,
+    pub tracking_number: Option<String>,
+    pub payment_slip_url: Option<String>,
+    pub payment_submitted_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct AdminOrderResponse {
     pub id: Uuid,
     pub user_id: Uuid,
     pub user_name: String,
     pub user_email: String,
     pub shipping_address_id: Option<Uuid>,
+    pub shipping_address_snapshot: Option<OrderShippingAddressSnapshot>,
     pub total_amount: Decimal,
     pub status: String,
     pub tracking_number: Option<String>,
@@ -133,7 +186,7 @@ pub struct AdminOrderSummary {
 
 #[derive(Debug, Serialize)]
 pub struct AdminOrderListResponse {
-    pub data: Vec<AdminOrder>,
+    pub data: Vec<AdminOrderListItemResponse>,
     pub total: i64,
     pub page: i64,
     pub limit: i64,

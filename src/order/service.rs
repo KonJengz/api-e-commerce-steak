@@ -28,22 +28,30 @@ pub async fn create_order(
     user_id: Uuid,
     req: &CreateOrderRequest,
 ) -> Result<OrderResponse, AppError> {
-    let address_exists = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM addresses WHERE id = $1 AND user_id = $2",
-    )
-    .bind(req.shipping_address_id)
-    .bind(user_id)
-    .fetch_one(pool)
-    .await?;
-
-    if address_exists == 0 {
-        return Err(AppError::BadRequest("Invalid shipping address".to_string()));
-    }
-
     let mut tx = pool
         .begin()
         .await
         .map_err(|e| AppError::Internal(format!("Failed to begin transaction: {}", e)))?;
+
+    let shipping_address = sqlx::query_as::<_, (String, Option<String>, String, String, String)>(
+        r#"SELECT recipient_name, phone, address_line, city, postal_code
+               FROM addresses
+               WHERE id = $1 AND user_id = $2
+               FOR UPDATE"#,
+    )
+    .bind(req.shipping_address_id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::BadRequest("Invalid shipping address".to_string()))?;
+
+    let (
+        shipping_recipient_name,
+        shipping_phone,
+        shipping_address_line,
+        shipping_city,
+        shipping_postal_code,
+    ) = shipping_address;
 
     let order_id = Uuid::now_v7();
     let now = Utc::now();
@@ -129,6 +137,11 @@ pub async fn create_order(
                id,
                user_id,
                shipping_address_id,
+               shipping_recipient_name,
+               shipping_phone,
+               shipping_address_line,
+               shipping_city,
+               shipping_postal_code,
                total_amount,
                status,
                tracking_number,
@@ -138,11 +151,16 @@ pub async fn create_order(
                created_at,
                updated_at
            )
-           VALUES ($1, $2, $3, $4, $5, NULL, NULL, NULL, NULL, $6, $6)"#,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, NULL, NULL, NULL, $11, $11)"#,
     )
     .bind(order_id)
     .bind(user_id)
     .bind(req.shipping_address_id)
+    .bind(&shipping_recipient_name)
+    .bind(&shipping_phone)
+    .bind(&shipping_address_line)
+    .bind(&shipping_city)
+    .bind(&shipping_postal_code)
     .bind(total_amount)
     .bind(ORDER_STATUS_PENDING)
     .bind(now)
@@ -159,6 +177,13 @@ pub async fn create_order(
         id: order_id,
         user_id,
         shipping_address_id: Some(req.shipping_address_id),
+        shipping_address_snapshot: Some(OrderShippingAddressSnapshot {
+            recipient_name: shipping_recipient_name,
+            phone: shipping_phone,
+            address_line: shipping_address_line,
+            city: shipping_city,
+            postal_code: shipping_postal_code,
+        }),
         total_amount,
         status: ORDER_STATUS_PENDING.to_string(),
         tracking_number: None,
@@ -175,14 +200,14 @@ pub async fn list_orders(
     pool: &PgPool,
     user_id: Uuid,
     query: PaginationQuery,
-) -> Result<PaginatedResponse<Order>, AppError> {
+) -> Result<PaginatedResponse<OrderListItemResponse>, AppError> {
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE user_id = $1")
         .bind(user_id)
         .fetch_one(pool)
         .await?;
 
     let orders = sqlx::query_as::<_, Order>(
-        r#"SELECT id, user_id, shipping_address_id, total_amount, status, tracking_number, payment_slip_url, payment_submitted_at, created_at, updated_at
+        r#"SELECT id, user_id, shipping_address_id, shipping_recipient_name, shipping_phone, shipping_address_line, shipping_city, shipping_postal_code, total_amount, status, tracking_number, payment_slip_url, payment_submitted_at, created_at, updated_at
            FROM orders WHERE user_id = $1
            ORDER BY created_at DESC
            LIMIT $2 OFFSET $3"#,
@@ -194,7 +219,7 @@ pub async fn list_orders(
     .await?;
 
     Ok(PaginatedResponse::new(
-        orders,
+        orders.into_iter().map(order_to_list_response).collect(),
         total,
         query.page(),
         query.limit(),
@@ -208,7 +233,7 @@ pub async fn get_order(
     order_id: Uuid,
 ) -> Result<OrderResponse, AppError> {
     let order = sqlx::query_as::<_, Order>(
-        r#"SELECT id, user_id, shipping_address_id, total_amount, status, tracking_number, payment_slip_url, payment_submitted_at, created_at, updated_at
+        r#"SELECT id, user_id, shipping_address_id, shipping_recipient_name, shipping_phone, shipping_address_line, shipping_city, shipping_postal_code, total_amount, status, tracking_number, payment_slip_url, payment_submitted_at, created_at, updated_at
            FROM orders WHERE id = $1 AND user_id = $2"#,
     )
     .bind(order_id)
@@ -242,6 +267,11 @@ pub async fn list_orders_for_admin(
                u.name AS user_name,
                u.email AS user_email,
                o.shipping_address_id,
+               o.shipping_recipient_name,
+               o.shipping_phone,
+               o.shipping_address_line,
+               o.shipping_city,
+               o.shipping_postal_code,
                o.total_amount,
                o.status,
                o.tracking_number,
@@ -285,7 +315,11 @@ pub async fn list_orders_for_admin(
     let paginated_response = PaginatedResponse::new(orders, total, query.page(), query.limit());
 
     Ok(AdminOrderListResponse {
-        data: paginated_response.data,
+        data: paginated_response
+            .data
+            .into_iter()
+            .map(admin_order_to_list_response)
+            .collect(),
         total: paginated_response.total,
         page: paginated_response.page,
         limit: paginated_response.limit,
@@ -349,7 +383,7 @@ pub async fn update_order_payment_slip(
                status = $4,
                updated_at = $3
            WHERE id = $5
-           RETURNING id, user_id, shipping_address_id, total_amount, status, tracking_number, payment_slip_url, payment_submitted_at, created_at, updated_at"#,
+           RETURNING id, user_id, shipping_address_id, shipping_recipient_name, shipping_phone, shipping_address_line, shipping_city, shipping_postal_code, total_amount, status, tracking_number, payment_slip_url, payment_submitted_at, created_at, updated_at"#,
     )
     .bind(payment_slip_url)
     .bind(payment_slip_public_id)
@@ -447,7 +481,7 @@ pub async fn update_order_for_admin(
                tracking_number = $2,
                updated_at = NOW()
            WHERE id = $3
-           RETURNING id, user_id, shipping_address_id, total_amount, status, tracking_number, payment_slip_url, payment_submitted_at, created_at, updated_at"#,
+           RETURNING id, user_id, shipping_address_id, shipping_recipient_name, shipping_phone, shipping_address_line, shipping_city, shipping_postal_code, total_amount, status, tracking_number, payment_slip_url, payment_submitted_at, created_at, updated_at"#,
     )
     .bind(&normalized_status)
     .bind(final_tracking_number.as_deref())
@@ -489,6 +523,13 @@ pub async fn update_order_for_admin(
         user_name,
         user_email,
         shipping_address_id: updated_order.shipping_address_id,
+        shipping_address_snapshot: build_shipping_address_snapshot(
+            updated_order.shipping_recipient_name,
+            updated_order.shipping_phone,
+            updated_order.shipping_address_line,
+            updated_order.shipping_city,
+            updated_order.shipping_postal_code,
+        ),
         total_amount: updated_order.total_amount,
         status: updated_order.status,
         tracking_number: updated_order.tracking_number,
@@ -510,6 +551,11 @@ async fn fetch_admin_order(pool: &PgPool, order_id: Uuid) -> Result<AdminOrder, 
                u.name AS user_name,
                u.email AS user_email,
                o.shipping_address_id,
+               o.shipping_recipient_name,
+               o.shipping_phone,
+               o.shipping_address_line,
+               o.shipping_city,
+               o.shipping_postal_code,
                o.total_amount,
                o.status,
                o.tracking_number,
@@ -593,11 +639,61 @@ async fn fetch_order_items(pool: &PgPool, order_id: Uuid) -> Result<Vec<OrderIte
     .map_err(AppError::from)
 }
 
+fn build_shipping_address_snapshot(
+    recipient_name: Option<String>,
+    phone: Option<String>,
+    address_line: Option<String>,
+    city: Option<String>,
+    postal_code: Option<String>,
+) -> Option<OrderShippingAddressSnapshot> {
+    match (recipient_name, address_line, city, postal_code) {
+        (Some(recipient_name), Some(address_line), Some(city), Some(postal_code)) => {
+            Some(OrderShippingAddressSnapshot {
+                recipient_name,
+                phone,
+                address_line,
+                city,
+                postal_code,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn order_to_list_response(order: Order) -> OrderListItemResponse {
+    OrderListItemResponse {
+        id: order.id,
+        user_id: order.user_id,
+        shipping_address_id: order.shipping_address_id,
+        shipping_address_snapshot: build_shipping_address_snapshot(
+            order.shipping_recipient_name,
+            order.shipping_phone,
+            order.shipping_address_line,
+            order.shipping_city,
+            order.shipping_postal_code,
+        ),
+        total_amount: order.total_amount,
+        status: order.status,
+        tracking_number: order.tracking_number,
+        payment_slip_url: order.payment_slip_url,
+        payment_submitted_at: order.payment_submitted_at,
+        created_at: order.created_at,
+        updated_at: order.updated_at,
+    }
+}
+
 fn order_to_response(order: Order, items: Vec<OrderItem>) -> OrderResponse {
     OrderResponse {
         id: order.id,
         user_id: order.user_id,
         shipping_address_id: order.shipping_address_id,
+        shipping_address_snapshot: build_shipping_address_snapshot(
+            order.shipping_recipient_name,
+            order.shipping_phone,
+            order.shipping_address_line,
+            order.shipping_city,
+            order.shipping_postal_code,
+        ),
         total_amount: order.total_amount,
         status: order.status,
         tracking_number: order.tracking_number,
@@ -609,6 +705,30 @@ fn order_to_response(order: Order, items: Vec<OrderItem>) -> OrderResponse {
     }
 }
 
+fn admin_order_to_list_response(order: AdminOrder) -> AdminOrderListItemResponse {
+    AdminOrderListItemResponse {
+        id: order.id,
+        user_id: order.user_id,
+        user_name: order.user_name,
+        user_email: order.user_email,
+        shipping_address_id: order.shipping_address_id,
+        shipping_address_snapshot: build_shipping_address_snapshot(
+            order.shipping_recipient_name,
+            order.shipping_phone,
+            order.shipping_address_line,
+            order.shipping_city,
+            order.shipping_postal_code,
+        ),
+        total_amount: order.total_amount,
+        status: order.status,
+        tracking_number: order.tracking_number,
+        payment_slip_url: order.payment_slip_url,
+        payment_submitted_at: order.payment_submitted_at,
+        created_at: order.created_at,
+        updated_at: order.updated_at,
+    }
+}
+
 fn admin_order_to_response(order: AdminOrder, items: Vec<OrderItem>) -> AdminOrderResponse {
     AdminOrderResponse {
         id: order.id,
@@ -616,6 +736,13 @@ fn admin_order_to_response(order: AdminOrder, items: Vec<OrderItem>) -> AdminOrd
         user_name: order.user_name,
         user_email: order.user_email,
         shipping_address_id: order.shipping_address_id,
+        shipping_address_snapshot: build_shipping_address_snapshot(
+            order.shipping_recipient_name,
+            order.shipping_phone,
+            order.shipping_address_line,
+            order.shipping_city,
+            order.shipping_postal_code,
+        ),
         total_amount: order.total_amount,
         status: order.status,
         tracking_number: order.tracking_number,
@@ -901,5 +1028,31 @@ mod tests {
             normalize_optional_order_status(Some("processing")),
             Err(AppError::BadRequest(_))
         ));
+    }
+
+    #[test]
+    fn shipping_snapshot_requires_core_fields() {
+        let snapshot = build_shipping_address_snapshot(
+            Some("Jane Doe".to_string()),
+            Some("0812345678".to_string()),
+            Some("123 ถนนสุขุมวิท".to_string()),
+            Some("Bangkok".to_string()),
+            Some("10110".to_string()),
+        )
+        .expect("snapshot should be built");
+
+        assert_eq!(snapshot.recipient_name, "Jane Doe");
+        assert_eq!(snapshot.phone.as_deref(), Some("0812345678"));
+
+        assert!(
+            build_shipping_address_snapshot(
+                None,
+                Some("0812345678".to_string()),
+                Some("123 ถนนสุขุมวิท".to_string()),
+                Some("Bangkok".to_string()),
+                Some("10110".to_string()),
+            )
+            .is_none()
+        );
     }
 }

@@ -22,6 +22,7 @@ use tower_http::trace::TraceLayer;
 use config::AppConfig;
 use shared::background::start_background_jobs;
 use shared::rate_limit::RateLimiter;
+use std::path::Path;
 
 /// Shared application state accessible by all handlers
 #[derive(Clone)]
@@ -54,6 +55,7 @@ async fn main() {
         .expect("Failed to connect to database");
 
     tracing::info!(environment = %config.app_env, "connected to database");
+    run_pending_migrations(&pool).await;
 
     let _background_jobs = start_background_jobs(pool.clone(), config.clone());
 
@@ -129,6 +131,19 @@ async fn main() {
     .with_graceful_shutdown(shutdown_signal())
     .await
     .expect("Server failed");
+}
+
+async fn run_pending_migrations(pool: &sqlx::PgPool) {
+    let migrator = sqlx::migrate::Migrator::new(Path::new("./migrations"))
+        .await
+        .expect("Failed to load migrations");
+
+    migrator
+        .run(pool)
+        .await
+        .expect("Failed to run database migrations");
+
+    tracing::info!("database migrations are up to date");
 }
 
 fn init_tracing(config: &AppConfig) {

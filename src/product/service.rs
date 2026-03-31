@@ -20,8 +20,9 @@ pub async fn list_products(
     pool: &PgPool,
     query: ProductFilterQuery,
 ) -> Result<PaginatedResponse<Product>, AppError> {
-    let mut count_query =
-        QueryBuilder::new("SELECT COUNT(*) FROM products p WHERE p.is_active = TRUE ");
+    let mut count_query = QueryBuilder::new(
+        "SELECT COUNT(*) FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.is_active = TRUE ",
+    );
     let mut data_query = QueryBuilder::new(
         "SELECT p.id, p.slug, p.name, p.description, p.category_id, c.name as category_name, c.slug as category_slug, p.image_url, p.image_public_id, p.current_price, p.stock, p.is_active, p.created_at, p.updated_at 
          FROM products p 

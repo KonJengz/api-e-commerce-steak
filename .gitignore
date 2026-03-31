@@ -11,3 +11,5 @@
 *.log
 *.swp
 *.swo
+.claude
+ARCHITECTURE.md

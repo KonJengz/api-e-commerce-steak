@@ -1,3 +1,6 @@
+#[path = "support/demo_seed.rs"]
+mod demo_seed;
+
 use sqlx::postgres::PgPoolOptions;
 
 #[tokio::main]
@@ -14,19 +17,7 @@ async fn main() {
         .await
         .expect("Failed to connect to database");
 
-    let email = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "admin@steakbox.dev".to_string());
-
-    let result = sqlx::query("UPDATE users SET role = 'ADMIN' WHERE email = $1")
-        .bind(&email)
-        .execute(&pool)
+    demo_seed::seed_demo_data(&pool)
         .await
-        .expect("Failed to update user role");
-
-    println!(
-        "✅ Updated {} rows. User {} is now ADMIN.",
-        result.rows_affected(),
-        email
-    );
+        .expect("Failed to seed demo storefront data");
 }

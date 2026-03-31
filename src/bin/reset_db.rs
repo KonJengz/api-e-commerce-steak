@@ -1,3 +1,6 @@
+#[path = "support/demo_seed.rs"]
+mod demo_seed;
+
 use sqlx::postgres::PgPoolOptions;
 use std::fs;
 use std::path::PathBuf;
@@ -46,6 +49,19 @@ async fn main() {
             .execute(&pool)
             .await
             .unwrap_or_else(|error| panic!("Failed to run migration {}: {}", path, error));
+    }
+
+    let skip_demo_seed = std::env::var("SKIP_DEMO_SEED")
+        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE"))
+        .unwrap_or(false);
+
+    if skip_demo_seed {
+        println!("Skipping demo storefront seed because SKIP_DEMO_SEED is enabled.");
+    } else {
+        println!("Seeding demo storefront data...");
+        demo_seed::seed_demo_data(&pool)
+            .await
+            .expect("Failed to seed demo storefront data");
     }
 
     println!("Database reset complete!");

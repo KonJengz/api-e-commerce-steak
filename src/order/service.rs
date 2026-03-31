@@ -58,6 +58,41 @@ pub async fn create_order(
     let mut total_amount = Decimal::ZERO;
     let mut order_items: Vec<OrderItem> = Vec::new();
 
+    sqlx::query(
+        r#"INSERT INTO orders (
+               id,
+               user_id,
+               shipping_address_id,
+               shipping_recipient_name,
+               shipping_phone,
+               shipping_address_line,
+               shipping_city,
+               shipping_postal_code,
+               total_amount,
+               status,
+               tracking_number,
+               payment_slip_url,
+               payment_slip_public_id,
+               payment_submitted_at,
+               created_at,
+               updated_at
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, NULL, NULL, NULL, $11, $11)"#,
+    )
+    .bind(order_id)
+    .bind(user_id)
+    .bind(req.shipping_address_id)
+    .bind(&shipping_recipient_name)
+    .bind(&shipping_phone)
+    .bind(&shipping_address_line)
+    .bind(&shipping_city)
+    .bind(&shipping_postal_code)
+    .bind(Decimal::ZERO)
+    .bind(ORDER_STATUS_PENDING)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+
     for item in &req.items {
         if item.quantity <= 0 {
             return Err(AppError::BadRequest(
@@ -133,37 +168,14 @@ pub async fn create_order(
     }
 
     sqlx::query(
-        r#"INSERT INTO orders (
-               id,
-               user_id,
-               shipping_address_id,
-               shipping_recipient_name,
-               shipping_phone,
-               shipping_address_line,
-               shipping_city,
-               shipping_postal_code,
-               total_amount,
-               status,
-               tracking_number,
-               payment_slip_url,
-               payment_slip_public_id,
-               payment_submitted_at,
-               created_at,
-               updated_at
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, NULL, NULL, NULL, $11, $11)"#,
+        r#"UPDATE orders
+           SET total_amount = $1,
+               updated_at = $2
+           WHERE id = $3"#,
     )
-    .bind(order_id)
-    .bind(user_id)
-    .bind(req.shipping_address_id)
-    .bind(&shipping_recipient_name)
-    .bind(&shipping_phone)
-    .bind(&shipping_address_line)
-    .bind(&shipping_city)
-    .bind(&shipping_postal_code)
     .bind(total_amount)
-    .bind(ORDER_STATUS_PENDING)
     .bind(now)
+    .bind(order_id)
     .execute(&mut *tx)
     .await?;
 

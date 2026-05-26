@@ -1,8 +1,6 @@
 services:
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: jengz/api-e-commerce-steak:latest
     restart: unless-stopped
     env_file:
       - ${APP_ENV_FILE:-.env.droplet}
